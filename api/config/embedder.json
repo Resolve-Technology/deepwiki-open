@@ -30,6 +30,18 @@
       "dimensions": 256
     }
   },
+  "embedder_vllm": {
+    "client_class": "VLLMClient",
+    "initialize_kwargs": {
+      "base_url": "${VLLM_EMBEDDER_BASE_URL}",
+      "api_key": "dummy"
+    },
+    "batch_size": 50,
+    "model_kwargs": {
+      "model": "${VLLM_EMBEDDER_MODEL}",
+      "encoding_format": "float"
+    }
+  },
   "retriever": {
     "top_k": 20
   },

@@ -113,6 +113,17 @@
         }
       }
     },
+    "vllm": {
+      "client_class": "VLLMClient",
+      "default_model": "google/gemma-4-26B-A4B-it",
+      "supportsCustomModel": true,
+      "models": {
+        "google/gemma-4-26B-A4B-it": {
+          "temperature": 0.7,
+          "top_p": 0.8
+        }
+      }
+    },
     "ollama": {
       "default_model": "qwen3:1.7b",
       "supportsCustomModel": true,
