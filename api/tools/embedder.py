@@ -23,7 +23,9 @@ def get_embedder(is_local_ollama: bool = False, use_google_embedder: bool = Fals
         elif embedder_type == 'bedrock':
             embedder_config = configs["embedder_bedrock"]
         elif embedder_type == 'vllm':
-            embedder_config = configs["embedder_vllm"]
+            embedder_config = configs.get("embedder_vllm")
+            if not embedder_config:
+                raise ValueError("embedder_vllm is not configured in embedder.json (DEEPWIKI_EMBEDDER_TYPE=vllm)")
         else:  # default to openai
             embedder_config = configs["embedder"]
     elif is_local_ollama:
@@ -40,7 +42,9 @@ def get_embedder(is_local_ollama: bool = False, use_google_embedder: bool = Fals
         elif current_type == 'google':
             embedder_config = configs["embedder_google"]
         elif current_type == 'vllm':
-            embedder_config = configs["embedder_vllm"]
+            embedder_config = configs.get("embedder_vllm")
+            if not embedder_config:
+                raise ValueError("embedder_vllm is not configured in embedder.json (DEEPWIKI_EMBEDDER_TYPE=vllm)")
         else:
             embedder_config = configs["embedder"]
 

@@ -80,7 +80,7 @@ async def handle_websocket_chat(websocket: WebSocket):
         if request.messages and len(request.messages) > 0:
             last_message = request.messages[-1]
             if hasattr(last_message, 'content') and last_message.content:
-                tokens = count_tokens(last_message.content, request.provider == "ollama")
+                tokens = count_tokens(last_message.content, is_ollama_embedder=(request.provider == "ollama"))
                 logger.info(f"Request size: {tokens} tokens")
                 if tokens > 8000:
                     logger.warning(f"Request exceeds recommended token limit ({tokens} > 7500)")

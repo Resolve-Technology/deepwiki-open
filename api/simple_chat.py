@@ -11,10 +11,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from api.config import get_model_config, configs, OPENROUTER_API_KEY, OPENAI_API_KEY, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+from api.config import get_model_config, configs, OPENROUTER_API_KEY, OPENAI_API_KEY, LITELLM_API_KEY, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
 from api.data_pipeline import count_tokens, get_file_content
 from api.openai_client import OpenAIClient
 from api.vllm_client import VLLMClient
+from api.litellm_client import LiteLLMClient
 from api.openrouter_client import OpenRouterClient
 from api.bedrock_client import BedrockClient
 from api.azureai_client import AzureAIClient
@@ -83,7 +84,7 @@ async def chat_completions_stream(request: ChatCompletionRequest):
         if request.messages and len(request.messages) > 0:
             last_message = request.messages[-1]
             if hasattr(last_message, 'content') and last_message.content:
-                tokens = count_tokens(last_message.content, request.provider == "ollama")
+                tokens = count_tokens(last_message.content, is_ollama_embedder=(request.provider == "ollama"))
                 logger.info(f"Request size: {tokens} tokens")
                 if tokens > 8000:
                     logger.warning(f"Request exceeds recommended token limit ({tokens} > 7500)")
@@ -415,6 +416,29 @@ async def chat_completions_stream(request: ChatCompletionRequest):
                 model_kwargs=model_kwargs,
                 model_type=ModelType.LLM
             )
+        elif request.provider == "litellm":
+            logger.info(f"Using LiteLLM (Openai protocol) with model: {request.model}")
+
+            # Check if a LiteLLM API key is set (the client also defaults it to "dummy")
+            if not LITELLM_API_KEY:
+                logger.warning("LITELLM_API_KEY not configured, but continuing with request")
+
+            # Initialize LiteLLM client (OpenAI-compatible)
+            model = LiteLLMClient()
+            model_kwargs = {
+                "model": request.model,
+                "stream": True,
+                "temperature": model_config["temperature"]
+            }
+            # Only add top_p if it exists in the model config
+            if "top_p" in model_config:
+                model_kwargs["top_p"] = model_config["top_p"]
+
+            api_kwargs = model.convert_inputs_to_api_kwargs(
+                input=prompt,
+                model_kwargs=model_kwargs,
+                model_type=ModelType.LLM
+            )
         elif request.provider == "bedrock":
             logger.info(f"Using AWS Bedrock with model: {request.model}")
 
@@ -503,7 +527,7 @@ async def chat_completions_stream(request: ChatCompletionRequest):
                     except Exception as e_openrouter:
                         logger.error(f"Error with OpenRouter API: {str(e_openrouter)}")
                         yield f"\nError with OpenRouter API: {str(e_openrouter)}\n\nPlease check that you have set the OPENROUTER_API_KEY environment variable with a valid API key."
-                elif request.provider in ("openai", "vllm"):
+                elif request.provider in ("openai", "vllm", "litellm"):
                     try:
                         # Get the response and handle it properly using the previously created api_kwargs
                         logger.info("Making Openai API call")
@@ -635,7 +659,7 @@ async def chat_completions_stream(request: ChatCompletionRequest):
                             except Exception as e_fallback:
                                 logger.error(f"Error with OpenRouter API fallback: {str(e_fallback)}")
                                 yield f"\nError with OpenRouter API fallback: {str(e_fallback)}\n\nPlease check that you have set the OPENROUTER_API_KEY environment variable with a valid API key."
-                        elif request.provider in ("openai", "vllm"):
+                        elif request.provider in ("openai", "vllm", "litellm"):
                             try:
                                 # Create new api_kwargs with the simplified prompt
                                 fallback_api_kwargs = model.convert_inputs_to_api_kwargs(
