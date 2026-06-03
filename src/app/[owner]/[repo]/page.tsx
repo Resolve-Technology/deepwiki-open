@@ -544,6 +544,7 @@ Remember:
 
         // Use WebSocket for communication
         let content = '';
+        let ws: WebSocket | undefined;
 
         try {
           // Create WebSocket URL from the server base URL
@@ -552,59 +553,58 @@ Remember:
           const wsUrl = `${wsBaseUrl}/ws/chat`;
 
           // Create a new WebSocket connection
-          const ws = new WebSocket(wsUrl);
+          ws = new WebSocket(wsUrl);
 
           // Create a promise that resolves when the WebSocket connection is complete
           await new Promise<void>((resolve, reject) => {
-            // Set up event handlers
-            ws.onopen = () => {
-              console.log(`WebSocket connection established for page: ${page.title}`);
-              // Send the request as JSON
-              ws.send(JSON.stringify(requestBody));
-              resolve();
-            };
-
-            ws.onerror = (error) => {
-              console.error('WebSocket error:', error);
-              reject(new Error('WebSocket connection failed'));
-            };
-
             // If the connection doesn't open within 5 seconds, fall back to HTTP
             const timeout = setTimeout(() => {
               reject(new Error('WebSocket connection timeout'));
             }, 5000);
 
-            // Clear the timeout if the connection opens successfully
-            ws.onopen = () => {
+            ws!.onopen = () => {
               clearTimeout(timeout);
               console.log(`WebSocket connection established for page: ${page.title}`);
               // Send the request as JSON
-              ws.send(JSON.stringify(requestBody));
+              ws!.send(JSON.stringify(requestBody));
               resolve();
+            };
+
+            ws!.onerror = (error) => {
+              clearTimeout(timeout);
+              console.error('WebSocket error:', error);
+              reject(new Error('WebSocket connection failed'));
             };
           });
 
           // Create a promise that resolves when the WebSocket response is complete
           await new Promise<void>((resolve, reject) => {
             // Handle incoming messages
-            ws.onmessage = (event) => {
+            ws!.onmessage = (event) => {
               content += event.data;
             };
 
             // Handle WebSocket close
-            ws.onclose = () => {
+            ws!.onclose = () => {
               console.log(`WebSocket connection closed for page: ${page.title}`);
               resolve();
             };
 
             // Handle WebSocket errors
-            ws.onerror = (error) => {
+            ws!.onerror = (error) => {
               console.error('WebSocket error during message reception:', error);
               reject(new Error('WebSocket error during message reception'));
             };
           });
         } catch (wsError) {
           console.error('WebSocket error, falling back to HTTP:', wsError);
+
+          // Detach the message handler and close the socket so a late message
+          // can't append to `content` after we reset it for the HTTP fallback.
+          if (ws) {
+            ws.onmessage = null;
+            try { ws.close(); } catch { /* ignore */ }
+          }
 
           // Fall back to HTTP if WebSocket fails
           const response = await fetch(`/api/chat/stream`, {
@@ -1008,11 +1008,18 @@ IMPORTANT:
       pages = [];
 
       if (parseError && (!pagesEls || pagesEls.length === 0)) {
-        console.warn('DOM parsing failed, trying regex fallback');
+        console.error('Wiki structure XML failed to parse and no pages were found');
+        throw new Error('Failed to parse the generated wiki structure. Please try regenerating the wiki.');
       }
 
-      pagesEls.forEach(pageEl => {
-        const id = pageEl.getAttribute('id') || `page-${pages.length + 1}`;
+      const seenPageIds = new Set<string>();
+      pagesEls.forEach((pageEl, index) => {
+        let id = pageEl.getAttribute('id') || `page-${index + 1}`;
+        // Guarantee uniqueness so a fallback id can't collide with an explicit one
+        while (seenPageIds.has(id)) {
+          id = `${id}-dup`;
+        }
+        seenPageIds.add(id);
         const titleEl = pageEl.querySelector('title');
         const importanceEl = pageEl.querySelector('importance');
         const filePathEls = pageEl.querySelectorAll('file_path');
@@ -1447,19 +1454,29 @@ IMPORTANT:
             // Store the default branch in state
             setDefaultBranch(defaultBranchLocal);
 
-            const apiUrl = `https://api.bitbucket.org/2.0/repositories/${encodedRepoPath}/src/${defaultBranchLocal}/?recursive=true&per_page=100`;
+            // Bitbucket paginates /src; follow the `next` cursor to get the full tree
+            // (a single page caps at per_page, so repos with >100 files were truncated).
+            let apiUrl: string | null = `https://api.bitbucket.org/2.0/repositories/${encodedRepoPath}/src/${defaultBranchLocal}/?recursive=true&per_page=100`;
             try {
-              const response = await fetch(apiUrl, {
-                headers
-              });
+              const accumulatedValues: Array<{ type: string; path: string }> = [];
+              while (apiUrl) {
+                const response = await fetch(apiUrl, { headers });
+                const structureResponseText = await response.text();
 
-              const structureResponseText = await response.text();
+                if (!response.ok) {
+                  apiErrorDetails = `Status: ${response.status}, Response: ${structureResponseText}`;
+                  break;
+                }
 
-              if (response.ok) {
-                filesData = JSON.parse(structureResponseText);
-              } else {
-                const errorData = structureResponseText;
-                apiErrorDetails = `Status: ${response.status}, Response: ${errorData}`;
+                const pageData = JSON.parse(structureResponseText);
+                if (Array.isArray(pageData.values)) {
+                  accumulatedValues.push(...pageData.values);
+                }
+                apiUrl = pageData.next || null;
+              }
+
+              if (accumulatedValues.length > 0) {
+                filesData = { values: accumulatedValues };
               }
             } catch (err) {
               console.error(`Network error fetching Bitbucket branch ${defaultBranchLocal}:`, err);
