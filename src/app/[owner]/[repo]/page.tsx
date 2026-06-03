@@ -419,6 +419,7 @@ export default function RepoWikiPage() {
  const promptContent =
 `You are an expert technical writer and software architect.
 Your task is to generate a comprehensive and accurate technical wiki page in Markdown format about a specific feature, system, or module within a given software project.
+Write in a formal, precise, structured technical-documentation style appropriate to the page's role within its document (a developer Wiki, a Technical Specification Document, or a Business and Functional Requirement document). Where the page documents data structures (copybooks/record layouts, physical/logical files), present them as field tables (field name, type/PIC, length, description); where it documents a program, summarize its business function, inputs/outputs, called modules, and key logic; where it documents a business or functional requirement, state it as numbered BR#/FR# items.
 
 You will be given:
 1. The "[WIKI_PAGE_TOPIC]" for the page you need to create.
@@ -489,6 +490,8 @@ Based ONLY on the content of the \`[RELEVANT_SOURCE_FILES]\`:
         *   API endpoint parameters, types, and descriptions.
         *   Configuration options, their types, and default values.
         *   Data model fields, types, constraints, and descriptions.
+        *   COBOL copybook / record-layout fields (field name, PIC/type, length, description).
+        *   Program inventory entries (program name, business function, key modifications/logic).
 
 5.  **Code Snippets (ENTIRELY OPTIONAL):**
     *   Include short, relevant code snippets (e.g., Python, Java, JavaScript, SQL, JSON, YAML) directly from the \`[RELEVANT_SOURCE_FILES]\` to illustrate key implementation details, data structures, or configurations.
@@ -744,18 +747,39 @@ When designing the wiki structure, include pages that would benefit from visual 
 - Class hierarchies
 
 ${isComprehensiveView ? `
-Create a structured wiki with the following main sections:
+Produce a SINGLE wiki that contains THREE top-level documents, each as its own top-level section (use subsections for the document's internal structure). Document the EXISTING system as-is (these are documentation views, not a change request). Only include a page/section if the repository content supports it. The three top-level sections, in this order:
+
+=== Top-level section 1: "📘 Wiki" (general technical wiki) ===
+A conventional developer wiki of the codebase:
 - Overview (general information about the project)
 - System Architecture (how the system is designed)
 - Core Features (key functionality)
-- Data Management/Flow: If applicable, how data is stored, processed, accessed, and managed (e.g., database schema, data pipelines, state management).
-- Frontend Components (UI elements, if applicable.)
-- Backend Systems (server-side components)
-- Model Integration (AI model connections)
-- Deployment/Infrastructure (how to deploy, what's the infrastructure like)
-- Extensibility and Customization: If the project architecture supports it, explain how to extend or customize its functionality (e.g., plugins, theming, custom modules, hooks).
+- Data Management/Flow (how data is stored, processed, accessed, and managed)
+- Components / Programs (the main programs or modules and what they do)
+- Deployment/Infrastructure (how it runs / is deployed, if evident)
 
-Each section should contain relevant pages. For example, the "Frontend Components" section might include pages for "Home Page", "Repository Wiki Page", "Ask Component", etc.
+=== Top-level section 2: "📐 TSD" (Technical Specification Document) ===
+A formal technical spec of the existing system, with these subsections:
+- Introduction (purpose and high-level overview)
+- Scope (Assumptions; Inclusions — Inputs, Outputs, Interfaces, Online/Batch Processing, Scheduling, Error Handling, Access Restrictions; Exclusions; Constraints)
+- Functional Specification (functional and non-functional behavior — what each program does)
+- System Overview (System Platform e.g. AS400/LifeAsia/DB2-400/OS400 if evident; Program Flow; Security Control — IAM, Logging, Encryption, Network, Database Security, Application Security; System Interface)
+- Database Design (Physical files [PF], Logical files [LF], copybooks and their record/data structures, Table definitions)
+- Program Inventory (one page per major program/group: business function and key logic, e.g. "CAL101", "GETPLONREC")
+- Schedule / Batch Processing (batch jobs and scheduling)
+- Appendix
+
+=== Top-level section 3: "📋 BRD" (Business and Functional Requirement) ===
+A business-oriented requirements document inferred from the system's behavior:
+- Background (business context and purpose of the system)
+- Boundaries (Scope — Inclusions/Exclusions; Assumptions; Constraints)
+- Business Requirements (Current Processing; Requirement Specification — list as BR# items; Business Flow Diagram; Data Archive and Housekeeping)
+- Functional Requirements (list as FR# items, each mapped to a BR#)
+- Non-Functional Requirements (Performance, Capacity, Availability, Reliability, Usability, Other)
+- Security Control (IAM, Log and Event Management, Encryption, Network, Database Security, Application Security, General Security)
+- Reference (Definition of Terminologies; Attachments)
+
+Each top-level section should contain its own pages/subsections. The same underlying source files may be cited across all three documents — that is expected, since each presents the system from a different angle (developer wiki / technical spec / business requirements).
 
 Return your analysis in the following XML format:
 
@@ -826,7 +850,7 @@ IMPORTANT FORMATTING INSTRUCTIONS:
 - Start directly with <wiki_structure> and end with </wiki_structure>
 
 IMPORTANT:
-1. Create ${isComprehensiveView ? '8-12' : '4-6'} pages that would make a ${isComprehensiveView ? 'comprehensive' : 'concise'} wiki for this repository
+1. Create ${isComprehensiveView ? '18-30 pages total spread across the three top-level documents (Wiki, TSD, BRD), each document having a meaningful set of pages' : '4-6 pages'} that would make a ${isComprehensiveView ? 'comprehensive' : 'concise'} wiki for this repository
 2. Each page should focus on a specific aspect of the codebase (e.g., architecture, key features, setup)
 3. The relevant_files should be actual files from the repository that would be used to generate that page
 4. Return ONLY valid XML with the structure specified above, with no markdown code block delimiters`
