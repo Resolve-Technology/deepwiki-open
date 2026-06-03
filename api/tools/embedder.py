@@ -1,8 +1,14 @@
+from functools import lru_cache
+
 import adalflow as adal
 
 from api.config import configs, get_embedder_type
 
 
+# Memoized: embedder clients are stateless/reusable, so reuse one instance per
+# (effective) configuration instead of rebuilding it on every RAG() / pipeline call.
+# The args are hashable and the underlying config is static after load.
+@lru_cache(maxsize=None)
 def get_embedder(is_local_ollama: bool = False, use_google_embedder: bool = False, embedder_type: str = None) -> adal.Embedder:
     """Get embedder based on configuration or parameters.
     

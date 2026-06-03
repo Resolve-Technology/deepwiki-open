@@ -24,6 +24,14 @@ logger = logging.getLogger(__name__)
 # Maximum token limit for OpenAI embedding models
 MAX_EMBEDDING_TOKENS = 8192
 
+# In-memory cache of deserialized embedding databases, keyed by the .pkl path.
+# Value: (mtime, documents). A wiki generation issues ~one request per page, each
+# of which would otherwise re-deserialize the same large .pkl; this reuses it.
+# Keyed on mtime so a re-index (which rewrites the .pkl) invalidates the entry.
+# The load path returns filter-agnostic docs, so the path+mtime key is sufficient.
+_DB_LOAD_CACHE: dict = {}
+_DB_LOAD_CACHE_MAX = 8
+
 def count_tokens(text: str, embedder_type: str = None, is_ollama_embedder: bool = None) -> int:
     """
     Count the number of tokens in a text string using tiktoken.
@@ -888,9 +896,22 @@ class DatabaseManager:
             embedder_type = 'ollama' if is_ollama_embedder else None
         # check the database
         if self.repo_paths and os.path.exists(self.repo_paths["save_db_file"]):
+            db_file = self.repo_paths["save_db_file"]
+            try:
+                mtime = os.path.getmtime(db_file)
+            except OSError:
+                mtime = None
+
+            # Reuse a previously deserialized DB if the .pkl hasn't changed.
+            cached = _DB_LOAD_CACHE.get(db_file)
+            if cached is not None and mtime is not None and cached[0] == mtime:
+                documents = cached[1]
+                logger.info("Using in-memory cached database (%s documents)", len(documents))
+                return documents
+
             logger.info("Loading existing database...")
             try:
-                self.db = LocalDB.load_state(self.repo_paths["save_db_file"])
+                self.db = LocalDB.load_state(db_file)
                 documents = self.db.get_transformed_data(key="split_and_embed")
                 if documents:
                     lengths = [_embedding_vector_length(doc) for doc in documents]
@@ -910,6 +931,10 @@ class DatabaseManager:
                             "Existing database contains no usable embeddings. Rebuilding embeddings..."
                         )
                     else:
+                        if mtime is not None:
+                            if len(_DB_LOAD_CACHE) >= _DB_LOAD_CACHE_MAX:
+                                _DB_LOAD_CACHE.clear()
+                            _DB_LOAD_CACHE[db_file] = (mtime, documents)
                         return documents
             except Exception as e:
                 logger.error(f"Error loading existing database: {e}")
