@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,10 +24,17 @@ app = FastAPI(
     description="API for streaming chat completions"
 )
 
-# Configure CORS
+# Configure CORS — restrict to an allow-list (override via DEEPWIKI_ALLOWED_ORIGINS,
+# a comma-separated list). Defaults to the local frontend origin.
+_allowed_origins_env = os.environ.get("DEEPWIKI_ALLOWED_ORIGINS")
+ALLOWED_ORIGINS = (
+    [o.strip() for o in _allowed_origins_env.split(",") if o.strip()]
+    if _allowed_origins_env
+    else ["http://localhost:3000"]
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],  # Allows all methods
     allow_headers=["*"],  # Allows all headers
@@ -268,9 +276,8 @@ async def export_wiki(request: WikiExportRequest):
         return response
 
     except Exception as e:
-        error_msg = f"Error exporting wiki: {str(e)}"
-        logger.error(error_msg)
-        raise HTTPException(status_code=500, detail=error_msg)
+        logger.error(f"Error exporting wiki: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error exporting wiki.")
 
 @app.get("/local_repo/structure")
 async def get_local_repo_structure(path: str = Query(None, description="Path to local repository")):
@@ -281,31 +288,49 @@ async def get_local_repo_structure(path: str = Query(None, description="Path to 
             content={"error": "No path provided. Please provide a 'path' query parameter."}
         )
 
-    if not os.path.isdir(path):
+    # Canonicalize the path and apply security guards.
+    real_path = os.path.realpath(path)
+
+    # Optional lockdown: if DEEPWIKI_LOCAL_REPO_BASE is set, restrict reads to that
+    # base directory. When unset, behaviour is unchanged (arbitrary local folders work),
+    # but symlink escape and unbounded reads below are still prevented.
+    allowed_base = os.environ.get("DEEPWIKI_LOCAL_REPO_BASE")
+    if allowed_base:
+        real_base = os.path.realpath(allowed_base)
+        if real_path != real_base and not real_path.startswith(real_base + os.sep):
+            logger.warning(f"Rejected local repo path outside allowed base: {real_path}")
+            return JSONResponse(
+                status_code=403,
+                content={"error": "Path is outside the allowed base directory."}
+            )
+
+    if not os.path.isdir(real_path):
         return JSONResponse(
             status_code=404,
-            content={"error": f"Directory not found: {path}"}
+            content={"error": "Directory not found."}
         )
 
+    MAX_README_BYTES = 1_000_000
     try:
-        logger.info(f"Processing local repository at: {path}")
+        logger.info(f"Processing local repository at: {real_path}")
         file_tree_lines = []
         readme_content = ""
 
-        for root, dirs, files in os.walk(path):
+        # followlinks=False prevents symlinks from escaping the tree.
+        for root, dirs, files in os.walk(real_path, followlinks=False):
             # Exclude hidden dirs/files and virtual envs
             dirs[:] = [d for d in dirs if not d.startswith('.') and d != '__pycache__' and d != 'node_modules' and d != '.venv']
             for file in files:
                 if file.startswith('.') or file == '__init__.py' or file == '.DS_Store':
                     continue
-                rel_dir = os.path.relpath(root, path)
+                rel_dir = os.path.relpath(root, real_path)
                 rel_file = os.path.join(rel_dir, file) if rel_dir != '.' else file
                 file_tree_lines.append(rel_file)
                 # Find README.md (case-insensitive)
                 if file.lower() == 'readme.md' and not readme_content:
                     try:
                         with open(os.path.join(root, file), 'r', encoding='utf-8') as f:
-                            readme_content = f.read()
+                            readme_content = f.read(MAX_README_BYTES)
                     except Exception as e:
                         logger.warning(f"Could not read README.md: {str(e)}")
                         readme_content = ""
@@ -313,10 +338,10 @@ async def get_local_repo_structure(path: str = Query(None, description="Path to 
         file_tree_str = '\n'.join(sorted(file_tree_lines))
         return {"file_tree": file_tree_str, "readme": readme_content}
     except Exception as e:
-        logger.error(f"Error processing local repository: {str(e)}")
+        logger.error(f"Error processing local repository: {str(e)}", exc_info=True)
         return JSONResponse(
             status_code=500,
-            content={"error": f"Error processing local repository: {str(e)}"}
+            content={"error": "Error processing local repository."}
         )
 
 def generate_markdown_export(repo_url: str, pages: List[WikiPage]) -> str:
@@ -405,10 +430,19 @@ app.add_websocket_route("/ws/chat", handle_websocket_chat)
 WIKI_CACHE_DIR = os.path.join(get_adalflow_default_root_path(), "wikicache")
 os.makedirs(WIKI_CACHE_DIR, exist_ok=True)
 
+_SAFE_CACHE_SEGMENT = re.compile(r'^[A-Za-z0-9._-]+$')
+
 def get_wiki_cache_path(owner: str, repo: str, repo_type: str, language: str) -> str:
-    """Generates the file path for a given wiki cache."""
+    """Generates the file path for a given wiki cache, with path-traversal guards."""
+    for seg in (owner, repo, repo_type, language):
+        if not seg or seg in ('.', '..') or not _SAFE_CACHE_SEGMENT.match(seg):
+            raise HTTPException(status_code=400, detail="Invalid repository identifier.")
     filename = f"deepwiki_cache_{repo_type}_{owner}_{repo}_{language}.json"
-    return os.path.join(WIKI_CACHE_DIR, filename)
+    path = os.path.join(WIKI_CACHE_DIR, filename)
+    # Containment backstop: the resolved path must stay inside the cache directory.
+    if not os.path.realpath(path).startswith(os.path.realpath(WIKI_CACHE_DIR) + os.sep):
+        raise HTTPException(status_code=400, detail="Invalid cache path.")
+    return path
 
 async def read_wiki_cache(owner: str, repo: str, repo_type: str, language: str) -> Optional[WikiCacheData]:
     """Reads wiki cache data from the file system."""
@@ -531,8 +565,8 @@ async def delete_wiki_cache(
             logger.info(f"Successfully deleted wiki cache: {cache_path}")
             return {"message": f"Wiki cache for {owner}/{repo} ({language}) deleted successfully"}
         except Exception as e:
-            logger.error(f"Error deleting wiki cache {cache_path}: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to delete wiki cache: {str(e)}")
+            logger.error(f"Error deleting wiki cache {cache_path}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to delete wiki cache.")
     else:
         logger.warning(f"Wiki cache not found, cannot delete: {cache_path}")
         raise HTTPException(status_code=404, detail="Wiki cache not found")

@@ -41,10 +41,17 @@ app = FastAPI(
     description="Simplified API for streaming chat completions"
 )
 
-# Configure CORS
+# Configure CORS — restrict to an allow-list (override via DEEPWIKI_ALLOWED_ORIGINS,
+# a comma-separated list). Defaults to the local frontend origin.
+_allowed_origins_env = os.environ.get("DEEPWIKI_ALLOWED_ORIGINS")
+ALLOWED_ORIGINS = (
+    [o.strip() for o in _allowed_origins_env.split(",") if o.strip()]
+    if _allowed_origins_env
+    else ["http://localhost:3000"]
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],  # Allows all methods
     allow_headers=["*"],  # Allows all headers
@@ -120,15 +127,15 @@ async def chat_completions_stream(request: ChatCompletionRequest):
                 logger.error(f"No valid embeddings found: {str(e)}")
                 raise HTTPException(status_code=500, detail="No valid document embeddings found. This may be due to embedding size inconsistencies or API errors during document processing. Please try again or check your repository content.")
             else:
-                logger.error(f"ValueError preparing retriever: {str(e)}")
-                raise HTTPException(status_code=500, detail=f"Error preparing retriever: {str(e)}")
+                logger.error(f"ValueError preparing retriever: {str(e)}", exc_info=True)
+                raise HTTPException(status_code=500, detail="Error preparing retriever. Please try again.")
         except Exception as e:
-            logger.error(f"Error preparing retriever: {str(e)}")
+            logger.error(f"Error preparing retriever: {str(e)}", exc_info=True)
             # Check for specific embedding-related errors
             if "All embeddings should be of the same size" in str(e):
                 raise HTTPException(status_code=500, detail="Inconsistent embedding sizes detected. Some documents may have failed to embed properly. Please try again.")
             else:
-                raise HTTPException(status_code=500, detail=f"Error preparing retriever: {str(e)}")
+                raise HTTPException(status_code=500, detail="Error preparing retriever. Please try again.")
 
         # Validate request
         if not request.messages or len(request.messages) == 0:

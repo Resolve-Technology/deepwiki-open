@@ -118,17 +118,17 @@ async def handle_websocket_chat(websocket: WebSocket):
                 await websocket.close()
                 return
             else:
-                logger.error(f"ValueError preparing retriever: {str(e)}")
-                await websocket.send_text(f"Error preparing retriever: {str(e)}")
+                logger.error(f"ValueError preparing retriever: {str(e)}", exc_info=True)
+                await websocket.send_text("Error preparing retriever. Please try again.")
                 await websocket.close()
                 return
         except Exception as e:
-            logger.error(f"Error preparing retriever: {str(e)}")
+            logger.error(f"Error preparing retriever: {str(e)}", exc_info=True)
             # Check for specific embedding-related errors
             if "All embeddings should be of the same size" in str(e):
                 await websocket.send_text("Error: Inconsistent embedding sizes detected. Some documents may have failed to embed properly. Please try again.")
             else:
-                await websocket.send_text(f"Error preparing retriever: {str(e)}")
+                await websocket.send_text("Error preparing retriever. Please try again.")
             await websocket.close()
             return
 
