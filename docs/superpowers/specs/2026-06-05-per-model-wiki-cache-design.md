@@ -25,6 +25,11 @@ processed-projects page.
    **most recently generated** version. Explicit `?provider=&model=` loads that exact version.
 4. **On model switch:** if a saved wiki exists for the newly selected provider/model, load
    it instantly; only generate on a miss. A separate **Regenerate** action forces regeneration.
+5. **Retrievable format:** the saved output is self-contained (repo URL/commit, provider,
+   model, generation timestamp, full pages), retrievable later via the API or file export.
+6. **Cross-model review:** an in-app "Model Review" action feeds a saved wiki plus the same
+   repository's code context (via the existing RAG chat pipeline) to a different LLM and
+   saves that review alongside the wiki.
 
 ## Design
 
@@ -79,6 +84,40 @@ e.g. deepwiki_cache_github_AsyncFuncAI_deepwiki-open_en~claude~claude-sonnet-4-6
     cache first (the DELETE already sends provider/model), then regenerates.
 - The page already displays provider/model from cache metadata, so the user always sees
   which LLM produced what is on screen.
+
+### Self-contained, retrievable output format
+
+Each saved version must stand alone so it can be retrieved later and handed (together with
+the repo) to another LLM:
+
+- `WikiCacheData` gains `generated_at` (ISO-8601 UTC, set server-side on save) and
+  `repo_commit` (best-effort `git rev-parse HEAD` of the local clone at
+  `~/.adalflow/repos/{owner}_{repo}`, or `localPath` for local repos; `None` if unavailable).
+  Together with the existing `provider`/`model`/`repo` fields, the cache JSON fully
+  identifies *what* was documented and *which model said it, when, against which commit*.
+- **Retrieval:** `GET /api/wiki_cache?...&provider=&model=` returns the full version JSON.
+- **Export:** `WikiExportRequest` gains optional `provider`/`model`/`generated_at`/
+  `repo_commit`; the markdown export header and the JSON export `metadata` block include
+  them, so a downloaded file is also self-describing. The save response returns the
+  generated metadata so the frontend can pass it to export.
+
+### In-app cross-model review
+
+- **Storage:** one JSON per (reviewed version × reviewer) in the same cache dir:
+  `deepwiki_review_{repo_type}_{owner}_{repo}_{language}~{reviewed_provider}~{reviewed_model}~{reviewer_provider}~{reviewer_model}.json`
+  containing repo info, both provider/model pairs, `created_at`, and the review markdown.
+  Same-key reviews overwrite (latest wins). The `deepwiki_review_` prefix keeps these out
+  of the processed-projects listing. Repo-wide cache deletion does not delete reviews.
+- **Endpoints:** `POST /api/wiki_review` (save, server sets `created_at`) and
+  `GET /api/wiki_review?owner&repo&repo_type&language` (list all reviews for a repo,
+  newest first).
+- **Frontend:** a "Model Review" button (next to Export) opens `WikiReviewModal`:
+  pick a reviewer provider/model (reusing `UserSelector`), the modal builds a review prompt
+  containing the loaded wiki's pages (per-page truncation against a ~200k-char budget) and
+  streams the review through the existing `/ws/chat` pipeline — RAG supplies the *same
+  repository's* code context to the reviewer. The finished review renders as markdown, is
+  saved via `POST /api/wiki_review`, and past reviews are listed in the modal.
+- `next.config.ts` gains a rewrite for `/api/wiki_review` → backend.
 
 ### Error handling & edge cases
 

@@ -4,7 +4,7 @@
 
 **Goal:** Save each LLM provider/model's generated wiki to its own cache file so different models' outputs coexist and can be compared by switching models, instead of overwriting each other.
 
-**Architecture:** Cache filenames gain a `~{provider}~{model}` suffix (`~` is outside the safe-segment charset, so parsing is unambiguous and legacy files still work). GET returns the exact version when provider/model are given, else the newest file by mtime. DELETE removes one version or all. The frontend passes provider/model on cache reads, loads a saved version instantly on model switch (generating only on miss), and gets a new "Regenerate" button for forced regeneration. The processed-projects page lists one row per version with a provider/model badge.
+**Architecture:** Cache filenames gain a `~{provider}~{model}` suffix (`~` is outside the safe-segment charset, so parsing is unambiguous and legacy files still work). GET returns the exact version when provider/model are given, else the newest file by mtime. DELETE removes one version or all. The frontend passes provider/model on cache reads, loads a saved version instantly on model switch (generating only on miss), and gets a new "Regenerate" button for forced regeneration. The processed-projects page lists one row per version with a provider/model badge. Each saved version is self-contained (`generated_at` + best-effort `repo_commit` alongside provider/model), exports carry the same metadata, and a "Model Review" action feeds a saved wiki plus the repo's RAG code context to a different LLM via the existing `/ws/chat` pipeline, saving the review as `deepwiki_review_*` JSON next to the caches.
 
 **Tech Stack:** FastAPI + Pydantic (backend, `api/api.py`), pytest (tests in `tests/unit/`), Next.js 15 + React + TypeScript (frontend, `src/`).
 
@@ -964,7 +964,791 @@ git commit -m "feat: list and manage per-model wiki versions on processed projec
 
 ---
 
-### Task 7: Full verification
+### Task 7: Backend + frontend — self-contained output format (generation metadata in cache & exports)
+
+Makes every saved version self-describing: *which model wrote it, when, against which commit* — so a retrieved file (via `GET /api/wiki_cache` or a downloaded export) can later be fed to another LLM together with the same git state.
+
+**Files:**
+- Modify: `api/api.py` (`WikiCacheData` ~98-107, `WikiExportRequest` ~120-126, `export_wiki` ~235-280, `generate_markdown_export` ~347-392, `generate_json_export` ~394-416, `save_wiki_cache`, `store_wiki_cache`)
+- Modify: `src/app/[owner]/[repo]/page.tsx` (`exportWiki` body ~1715-1720, cache-hit block ~1896-1903, save-success block ~2105-2106)
+- Test: `tests/unit/test_wiki_cache_versions.py`
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `tests/unit/test_wiki_cache_versions.py`:
+
+```python
+# --- generation metadata & export format ---
+
+def test_save_sets_generated_at(cache_dir):
+    asyncio.run(save_wiki_cache(make_cache_request("claude", "claude-sonnet-4-6")))
+    data = asyncio.run(read_wiki_cache("owner", "repo", "github", "en",
+                                       provider="claude", model="claude-sonnet-4-6"))
+    assert data.generated_at  # ISO timestamp set server-side on save
+    assert "T" in data.generated_at
+
+def test_get_repo_commit_missing_repo_returns_none():
+    commit = api_module.get_repo_commit(
+        RepoInfo(owner="definitely-not", repo="cloned", type="github"))
+    assert commit is None
+
+def test_get_repo_commit_reads_head_of_local_repo(tmp_path):
+    import subprocess
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "f.txt").write_text("x")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "-c", "user.email=t@t.t", "-c", "user.name=t",
+                    "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
+    commit = api_module.get_repo_commit(
+        RepoInfo(owner="o", repo="r", type="local", localPath=str(tmp_path)))
+    assert commit is not None and len(commit) == 40
+
+def test_markdown_export_includes_generation_metadata():
+    req = make_cache_request("claude", "claude-sonnet-4-6")
+    md = api_module.generate_markdown_export(
+        "https://github.com/owner/repo", list(req.generated_pages.values()),
+        provider="claude", model="claude-sonnet-4-6",
+        generated_at="2026-06-05T00:00:00+00:00", repo_commit="abc1234")
+    assert "claude/claude-sonnet-4-6" in md
+    assert "abc1234" in md
+    assert "2026-06-05T00:00:00+00:00" in md
+
+def test_json_export_includes_generation_metadata():
+    req = make_cache_request("claude", "claude-sonnet-4-6")
+    out = json.loads(api_module.generate_json_export(
+        "https://github.com/owner/repo", list(req.generated_pages.values()),
+        provider="claude", model="claude-sonnet-4-6",
+        generated_at="2026-06-05T00:00:00+00:00", repo_commit="abc1234"))
+    assert out["metadata"]["provider"] == "claude"
+    assert out["metadata"]["model"] == "claude-sonnet-4-6"
+    assert out["metadata"]["repo_commit"] == "abc1234"
+    assert out["metadata"]["generated_at"] == "2026-06-05T00:00:00+00:00"
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `python -m pytest tests/unit/test_wiki_cache_versions.py -v -k "generated_at or repo_commit or export"`
+Expected: FAIL — `module 'api.api' has no attribute 'get_repo_commit'` / unexpected keyword args.
+
+- [ ] **Step 3: Add metadata fields and the commit helper to `api/api.py`**
+
+Imports: add `import subprocess` and make the datetime import `from datetime import datetime, timezone` (extend the existing line).
+
+In `WikiCacheData` (`api/api.py:98-107`), add two fields after `model`:
+
+```python
+    generated_at: Optional[str] = None  # ISO-8601 UTC, set server-side on save
+    repo_commit: Optional[str] = None   # git HEAD of the analyzed clone, when resolvable
+```
+
+Below `get_adalflow_default_root_path()` (`api/api.py:44-45`), add:
+
+```python
+def get_repo_commit(repo: RepoInfo) -> Optional[str]:
+    """Best-effort git HEAD of the repo clone the wiki was generated from.
+
+    Cloned repos live at ~/.adalflow/repos/{owner}_{repo}; local repos use their
+    own path. Returns None when the clone or git metadata is unavailable.
+    """
+    try:
+        if repo.type == "local" and repo.localPath:
+            repo_dir = repo.localPath
+        else:
+            repo_dir = os.path.join(get_adalflow_default_root_path(), "repos",
+                                    f"{repo.owner}_{repo.repo}")
+        if not os.path.isdir(os.path.join(repo_dir, ".git")):
+            return None
+        result = subprocess.run(["git", "-C", repo_dir, "rev-parse", "HEAD"],
+                                capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception as e:
+        logger.warning(f"Could not determine repo commit for {repo.owner}/{repo.repo}: {e}")
+    return None
+```
+
+(Note: `get_repo_commit` must appear after `RepoInfo` is defined — place it right after the Pydantic models if the helper section comes first.)
+
+In `save_wiki_cache`, extend the payload construction:
+
+```python
+        payload = WikiCacheData(
+            wiki_structure=data.wiki_structure,
+            generated_pages=data.generated_pages,
+            repo=data.repo,
+            provider=data.provider,
+            model=data.model,
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            repo_commit=get_repo_commit(data.repo)
+        )
+```
+
+In `store_wiki_cache` (the POST endpoint), return the new metadata so the frontend can hold it for exports — replace the success return:
+
+```python
+    success = await save_wiki_cache(request_data)
+    if success:
+        saved = await read_wiki_cache(request_data.repo.owner, request_data.repo.repo,
+                                      request_data.repo.type, request_data.language,
+                                      request_data.provider, request_data.model)
+        return {
+            "message": "Wiki cache saved successfully",
+            "generated_at": saved.generated_at if saved else None,
+            "repo_commit": saved.repo_commit if saved else None,
+        }
+```
+
+- [ ] **Step 4: Thread metadata through the export endpoint**
+
+In `WikiExportRequest` (`api/api.py:120-126`), add after `format`:
+
+```python
+    provider: Optional[str] = Field(None, description="LLM provider that generated the wiki")
+    model: Optional[str] = Field(None, description="Model that generated the wiki")
+    generated_at: Optional[str] = Field(None, description="When the wiki was generated (ISO-8601)")
+    repo_commit: Optional[str] = Field(None, description="Repository commit the wiki was generated against")
+```
+
+Change both generator signatures and their call sites in `export_wiki` (`api/api.py:258` and `:263`):
+
+```python
+            content = generate_markdown_export(request.repo_url, request.pages,
+                                               provider=request.provider, model=request.model,
+                                               generated_at=request.generated_at,
+                                               repo_commit=request.repo_commit)
+```
+```python
+            content = generate_json_export(request.repo_url, request.pages,
+                                           provider=request.provider, model=request.model,
+                                           generated_at=request.generated_at,
+                                           repo_commit=request.repo_commit)
+```
+
+`generate_markdown_export` — change the signature (line 347) and replace only the two "Start with metadata" lines (lines 358-360); the docstring, table of contents, and page loop below them stay exactly as they are:
+
+```python
+def generate_markdown_export(repo_url: str, pages: List[WikiPage],
+                             provider: Optional[str] = None, model: Optional[str] = None,
+                             generated_at: Optional[str] = None,
+                             repo_commit: Optional[str] = None) -> str:
+```
+
+```python
+    # Start with metadata
+    markdown = f"# Wiki Documentation for {repo_url}\n\n"
+    markdown += f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+    if provider and model:
+        markdown += f"Generated by: {provider}/{model}\n\n"
+    if generated_at:
+        markdown += f"Wiki generated at: {generated_at}\n\n"
+    if repo_commit:
+        markdown += f"Repository commit: {repo_commit}\n\n"
+```
+
+`generate_json_export` — change the signature (line 394) and replace the `export_data` dict (lines 406-413); the docstring and the final `json.dumps` line stay as they are:
+
+```python
+def generate_json_export(repo_url: str, pages: List[WikiPage],
+                         provider: Optional[str] = None, model: Optional[str] = None,
+                         generated_at: Optional[str] = None,
+                         repo_commit: Optional[str] = None) -> str:
+```
+
+```python
+    export_data = {
+        "metadata": {
+            "repository": repo_url,
+            "generated_at": generated_at or datetime.now().isoformat(),
+            "provider": provider,
+            "model": model,
+            "repo_commit": repo_commit,
+            "page_count": len(pages)
+        },
+        "pages": [page.model_dump() for page in pages]
+    }
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `python -m pytest tests/unit/test_wiki_cache_versions.py -v`
+Expected: ALL tests PASS.
+
+- [ ] **Step 6: Frontend — keep and send the metadata**
+
+In `src/app/[owner]/[repo]/page.tsx`:
+
+(a) Add state near the other wiki state declarations (around line 244):
+
+```typescript
+  const [wikiMeta, setWikiMeta] = useState<{ generatedAt?: string; repoCommit?: string }>({});
+```
+
+(b) In the cache-hit block of `loadData` (right after `setSelectedProviderState(cachedData.provider)` around line 1903), add:
+
+```typescript
+              setWikiMeta({ generatedAt: cachedData.generated_at, repoCommit: cachedData.repo_commit });
+```
+
+(c) In the save-success block (`if (response.ok)` around line 2105), replace the body:
+
+```typescript
+            if (response.ok) {
+              console.log('Wiki data successfully saved to server cache');
+              const result = await response.json().catch(() => null);
+              if (result) {
+                setWikiMeta({ generatedAt: result.generated_at, repoCommit: result.repo_commit });
+              }
+            } else {
+```
+
+(d) In `exportWiki` (`page.tsx:1715-1720`), extend the request body:
+
+```typescript
+        body: JSON.stringify({
+          repo_url: repoUrl,
+          type: effectiveRepoInfo.type,
+          pages: pagesToExport,
+          format,
+          provider: selectedProviderState,
+          model: selectedModelState,
+          generated_at: wikiMeta.generatedAt,
+          repo_commit: wikiMeta.repoCommit
+        })
+```
+
+and add `selectedProviderState, selectedModelState, wikiMeta` to `exportWiki`'s dependency array (line 1758).
+
+- [ ] **Step 7: Build and commit**
+
+```bash
+npm run build
+git add api/api.py tests/unit/test_wiki_cache_versions.py src/app/\[owner\]/\[repo\]/page.tsx
+git commit -m "feat: self-contained wiki output format with generation metadata in cache and exports"
+```
+
+---
+
+### Task 8: Backend — cross-model review storage and endpoints
+
+**Files:**
+- Modify: `api/api.py` (new `WikiReviewData` model, `get_wiki_review_path`, `POST/GET /api/wiki_review`)
+- Test: `tests/unit/test_wiki_cache_versions.py`
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `tests/unit/test_wiki_cache_versions.py`:
+
+```python
+# --- cross-model wiki reviews ---
+
+def make_review(reviewer_provider="openai", reviewer_model="gpt-4o", content="Looks accurate."):
+    return api_module.WikiReviewData(
+        repo=RepoInfo(owner="owner", repo="repo", type="github"),
+        language="en",
+        reviewed_provider="claude",
+        reviewed_model="claude-sonnet-4-6",
+        reviewer_provider=reviewer_provider,
+        reviewer_model=reviewer_model,
+        content=content,
+    )
+
+def test_review_save_and_list_roundtrip(cache_dir):
+    asyncio.run(api_module.store_wiki_review(make_review()))
+    reviews = asyncio.run(api_module.get_wiki_reviews(
+        owner="owner", repo="repo", repo_type="github", language="en"))
+    assert len(reviews) == 1
+    assert reviews[0].reviewer_provider == "openai"
+    assert reviews[0].reviewed_model == "claude-sonnet-4-6"
+    assert reviews[0].created_at  # set server-side
+
+def test_review_same_key_overwrites(cache_dir):
+    asyncio.run(api_module.store_wiki_review(make_review(content="v1")))
+    asyncio.run(api_module.store_wiki_review(make_review(content="v2")))
+    reviews = asyncio.run(api_module.get_wiki_reviews(
+        owner="owner", repo="repo", repo_type="github", language="en"))
+    assert len(reviews) == 1
+    assert reviews[0].content == "v2"
+
+def test_review_different_reviewers_coexist(cache_dir):
+    asyncio.run(api_module.store_wiki_review(make_review("openai", "gpt-4o")))
+    asyncio.run(api_module.store_wiki_review(make_review("vllm", "Qwen/Qwen3-32B")))
+    reviews = asyncio.run(api_module.get_wiki_reviews(
+        owner="owner", repo="repo", repo_type="github", language="en"))
+    assert len(reviews) == 2
+
+def test_review_files_invisible_to_wiki_cache(cache_dir):
+    asyncio.run(api_module.store_wiki_review(make_review()))
+    review_files = os.listdir(cache_dir)
+    assert len(review_files) == 1
+    assert review_files[0].startswith("deepwiki_review_")
+    # Review files are not parsed as wiki caches and not picked up by newest-wins
+    assert parse_wiki_cache_filename(review_files[0]) is None
+    assert list_wiki_cache_paths("owner", "repo", "github", "en") == []
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `python -m pytest tests/unit/test_wiki_cache_versions.py -v -k "review"`
+Expected: FAIL — `module 'api.api' has no attribute 'WikiReviewData'`.
+
+- [ ] **Step 3: Implement model, path helper, and endpoints**
+
+In `api/api.py`, after `WikiCacheRequest` (~line 118), add:
+
+```python
+class WikiReviewData(BaseModel):
+    """A cross-model review of one saved wiki version."""
+    repo: RepoInfo
+    language: str
+    reviewed_provider: str   # provider/model that generated the wiki under review
+    reviewed_model: str
+    reviewer_provider: str   # provider/model that performed the review
+    reviewer_model: str
+    content: str             # review markdown produced by the reviewer model
+    created_at: Optional[str] = None  # ISO-8601 UTC, set server-side on save
+```
+
+After `list_wiki_cache_paths` in the cache-helpers section, add:
+
+```python
+def get_wiki_review_path(owner: str, repo: str, repo_type: str, language: str,
+                         reviewed_provider: str, reviewed_model: str,
+                         reviewer_provider: str, reviewer_model: str) -> str:
+    """Path for a cross-model review file; same guards as wiki cache paths."""
+    for seg in (owner, repo, repo_type, language):
+        if not seg or seg in ('.', '..') or not _SAFE_CACHE_SEGMENT.match(seg):
+            raise HTTPException(status_code=400, detail="Invalid repository identifier.")
+    version_segs = [sanitize_version_segment(s) for s in
+                    (reviewed_provider, reviewed_model, reviewer_provider, reviewer_model)]
+    if not all(version_segs):
+        raise HTTPException(status_code=400, detail="Invalid provider/model identifier.")
+    filename = (f"deepwiki_review_{repo_type}_{owner}_{repo}_{language}~"
+                + "~".join(version_segs) + ".json")
+    path = os.path.join(WIKI_CACHE_DIR, filename)
+    # Containment backstop: the resolved path must stay inside the cache directory.
+    if not os.path.realpath(path).startswith(os.path.realpath(WIKI_CACHE_DIR) + os.sep):
+        raise HTTPException(status_code=400, detail="Invalid cache path.")
+    return path
+```
+
+After the `DELETE /api/wiki_cache` endpoint, add:
+
+```python
+@app.post("/api/wiki_review")
+async def store_wiki_review(review: WikiReviewData):
+    """Saves a cross-model review next to the wiki caches (same key overwrites)."""
+    review.created_at = datetime.now(timezone.utc).isoformat()
+    review_path = get_wiki_review_path(
+        review.repo.owner, review.repo.repo, review.repo.type, review.language,
+        review.reviewed_provider, review.reviewed_model,
+        review.reviewer_provider, review.reviewer_model)
+    try:
+        with open(review_path, 'w', encoding='utf-8') as f:
+            json.dump(review.model_dump(), f, indent=2)
+        logger.info(f"Wiki review saved to {review_path}")
+        return {"message": "Wiki review saved successfully", "created_at": review.created_at}
+    except Exception as e:
+        logger.error(f"Error saving wiki review to {review_path}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to save wiki review")
+
+@app.get("/api/wiki_review", response_model=List[WikiReviewData])
+async def get_wiki_reviews(
+    owner: str = Query(..., description="Repository owner"),
+    repo: str = Query(..., description="Repository name"),
+    repo_type: str = Query(..., description="Repository type (e.g., github, gitlab)"),
+    language: str = Query(..., description="Language of the wiki content")
+):
+    """Lists all saved cross-model reviews for a repository, newest first."""
+    for seg in (owner, repo, repo_type, language):
+        if not seg or seg in ('.', '..') or not _SAFE_CACHE_SEGMENT.match(seg):
+            raise HTTPException(status_code=400, detail="Invalid repository identifier.")
+    pattern = os.path.join(WIKI_CACHE_DIR,
+                           f"deepwiki_review_{repo_type}_{owner}_{repo}_{language}~*.json")
+    reviews = []
+    for review_path in glob.glob(pattern):
+        try:
+            with open(review_path, 'r', encoding='utf-8') as f:
+                reviews.append(WikiReviewData(**json.load(f)))
+        except Exception as e:
+            logger.error(f"Error reading wiki review from {review_path}: {e}")
+            continue
+    reviews.sort(key=lambda r: r.created_at or "", reverse=True)
+    return reviews
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `python -m pytest tests/unit/test_wiki_cache_versions.py -v`
+Expected: ALL tests PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add api/api.py tests/unit/test_wiki_cache_versions.py
+git commit -m "feat: wiki review storage and endpoints for cross-model review"
+```
+
+---
+
+### Task 9: Frontend — "Model Review" modal (stream review from another LLM, save it)
+
+**Files:**
+- Create: `src/components/WikiReviewModal.tsx`
+- Modify: `next.config.ts` (rewrites)
+- Modify: `src/app/[owner]/[repo]/page.tsx` (button near Export, modal wiring)
+
+- [ ] **Step 1: Add the `/api/wiki_review` rewrite**
+
+In `next.config.ts`, inside `async rewrites()`, after the `/api/wiki_cache` entry:
+
+```typescript
+      {
+        source: '/api/wiki_review',
+        destination: `${TARGET_SERVER_BASE_URL}/api/wiki_review`,
+      },
+```
+
+- [ ] **Step 2: Create `src/components/WikiReviewModal.tsx`**
+
+```tsx
+'use client';
+
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import Markdown from './Markdown';
+import UserSelector from './UserSelector';
+import RepoInfo from '@/types/repoinfo';
+import getRepoUrl from '@/utils/getRepoUrl';
+import { createChatWebSocket, closeWebSocket, ChatCompletionRequest } from '@/utils/websocketClient';
+import { WikiPage } from '@/types/wiki/wikipage';
+
+// Char budget for wiki content embedded in the review prompt; pages are
+// truncated proportionally so the request fits smaller reviewer contexts too.
+const MAX_REVIEW_CHARS = 200_000;
+
+interface WikiReview {
+  repo: RepoInfo;
+  language: string;
+  reviewed_provider: string;
+  reviewed_model: string;
+  reviewer_provider: string;
+  reviewer_model: string;
+  content: string;
+  created_at?: string;
+}
+
+interface WikiReviewModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  repoInfo: RepoInfo;
+  language: string;
+  pages: WikiPage[];          // pages of the currently loaded wiki version
+  reviewedProvider: string;   // provider/model that generated the loaded wiki
+  reviewedModel: string;
+  token?: string;
+}
+
+export default function WikiReviewModal({
+  isOpen,
+  onClose,
+  repoInfo,
+  language,
+  pages,
+  reviewedProvider,
+  reviewedModel,
+  token,
+}: WikiReviewModalProps) {
+  const [reviewerProvider, setReviewerProvider] = useState('');
+  const [reviewerModel, setReviewerModel] = useState('');
+  const [isCustomModel, setIsCustomModel] = useState(false);
+  const [customModel, setCustomModel] = useState('');
+  const [reviewContent, setReviewContent] = useState('');
+  const [isReviewing, setIsReviewing] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [pastReviews, setPastReviews] = useState<WikiReview[]>([]);
+  const webSocketRef = useRef<WebSocket | null>(null);
+
+  // Load past reviews whenever the modal opens
+  useEffect(() => {
+    if (!isOpen) return;
+    const params = new URLSearchParams({
+      owner: repoInfo.owner,
+      repo: repoInfo.repo,
+      repo_type: repoInfo.type,
+      language: language,
+    });
+    fetch(`/api/wiki_review?${params.toString()}`)
+      .then(res => (res.ok ? res.json() : []))
+      .then((data: WikiReview[]) => setPastReviews(Array.isArray(data) ? data : []))
+      .catch(() => setPastReviews([]));
+  }, [isOpen, repoInfo.owner, repoInfo.repo, repoInfo.type, language]);
+
+  // Close any in-flight websocket on unmount
+  useEffect(() => () => closeWebSocket(webSocketRef.current), []);
+
+  const buildReviewPrompt = useCallback(() => {
+    const perPageBudget = Math.max(2000, Math.floor(MAX_REVIEW_CHARS / Math.max(pages.length, 1)));
+    const wikiText = pages.map(page => {
+      const body = page.content.length > perPageBudget
+        ? page.content.slice(0, perPageBudget) + '\n\n...[truncated for review]'
+        : page.content;
+      return `<page title="${page.title}" files="${page.filePaths.join(', ')}">\n${body}\n</page>`;
+    }).join('\n\n');
+    return `You are reviewing AI-generated wiki documentation for the repository ${getRepoUrl(repoInfo)}.
+The wiki below was generated by ${reviewedProvider}/${reviewedModel}. You have access to the repository's actual source code through the provided context — use it to verify claims.
+
+Review the wiki for:
+1. Factual accuracy against the actual code (wrong claims, invented APIs, incorrect architecture descriptions)
+2. Completeness (important modules, flows or configuration that are missing or under-explained)
+3. Clarity and structure
+4. Mermaid diagram correctness
+
+Be specific: name the page and quote the inaccurate statement when you flag something. End with a short summary verdict and an overall quality score from 1-10.
+
+<wiki>
+${wikiText}
+</wiki>`;
+  }, [pages, repoInfo, reviewedProvider, reviewedModel]);
+
+  const saveReview = useCallback(async (content: string, provider: string, model: string) => {
+    try {
+      const response = await fetch('/api/wiki_review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          repo: repoInfo,
+          language: language,
+          reviewed_provider: reviewedProvider,
+          reviewed_model: reviewedModel,
+          reviewer_provider: provider,
+          reviewer_model: model,
+          content: content,
+        }),
+      });
+      if (response.ok) {
+        const saved = await response.json().catch(() => null);
+        setPastReviews(prev => [{
+          repo: repoInfo,
+          language,
+          reviewed_provider: reviewedProvider,
+          reviewed_model: reviewedModel,
+          reviewer_provider: provider,
+          reviewer_model: model,
+          content,
+          created_at: saved?.created_at,
+        }, ...prev.filter(r =>
+          !(r.reviewed_provider === reviewedProvider && r.reviewed_model === reviewedModel &&
+            r.reviewer_provider === provider && r.reviewer_model === model))]);
+      } else {
+        console.error('Failed to save wiki review:', response.status, await response.text());
+      }
+    } catch (err) {
+      console.error('Error saving wiki review:', err);
+    }
+  }, [repoInfo, language, reviewedProvider, reviewedModel]);
+
+  const startReview = useCallback(() => {
+    const effectiveModel = isCustomModel ? customModel : reviewerModel;
+    if (!reviewerProvider || !effectiveModel) {
+      setReviewError('Select a reviewer provider and model first.');
+      return;
+    }
+    setReviewError(null);
+    setReviewContent('');
+    setIsReviewing(true);
+
+    const request: ChatCompletionRequest = {
+      repo_url: getRepoUrl(repoInfo),
+      type: repoInfo.type,
+      messages: [{ role: 'user', content: buildReviewPrompt() }],
+      provider: reviewerProvider,
+      model: effectiveModel,
+      language: language,
+      token: token,
+    };
+
+    let content = '';
+    webSocketRef.current = createChatWebSocket(
+      request,
+      (message: string) => {
+        content += message;
+        setReviewContent(content);
+      },
+      () => {
+        setIsReviewing(false);
+        setReviewError('Error during review generation. Check the reviewer model and try again.');
+      },
+      () => {
+        setIsReviewing(false);
+        if (content.trim()) {
+          saveReview(content, reviewerProvider, effectiveModel);
+        }
+      },
+    );
+  }, [reviewerProvider, reviewerModel, isCustomModel, customModel, repoInfo, language, token, buildReviewPrompt, saveReview]);
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 overflow-y-auto">
+      <div className="flex min-h-screen items-center justify-center p-4 text-center bg-black/50">
+        <div className="relative transform overflow-hidden rounded-lg bg-[var(--card-bg)] text-left shadow-xl transition-all sm:my-8 sm:max-w-3xl sm:w-full">
+          {/* Header */}
+          <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--border-color)]">
+            <h3 className="text-lg font-medium text-[var(--accent-primary)]">
+              Model Review — wiki by {reviewedProvider}/{reviewedModel}
+            </h3>
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-[var(--muted)] hover:text-[var(--foreground)] focus:outline-none transition-colors"
+            >
+              <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+
+          {/* Body */}
+          <div className="p-6 max-h-[70vh] overflow-y-auto">
+            <p className="text-sm text-[var(--muted)] mb-4">
+              Pick a different model to review this wiki against the repository&apos;s actual code.
+            </p>
+            <UserSelector
+              provider={reviewerProvider}
+              setProvider={setReviewerProvider}
+              model={reviewerModel}
+              setModel={setReviewerModel}
+              isCustomModel={isCustomModel}
+              setIsCustomModel={setIsCustomModel}
+              customModel={customModel}
+              setCustomModel={setCustomModel}
+              showFileFilters={false}
+            />
+
+            {reviewError && (
+              <div className="mt-4 p-3 rounded-md border border-[var(--highlight)]/30 text-sm text-[var(--highlight)]">
+                {reviewError}
+              </div>
+            )}
+
+            {reviewContent && (
+              <div className="mt-4 p-4 rounded-md border border-[var(--border-color)] bg-[var(--background)]">
+                <Markdown content={reviewContent} />
+              </div>
+            )}
+
+            {/* Past reviews */}
+            {pastReviews.length > 0 && !reviewContent && (
+              <div className="mt-6">
+                <h4 className="text-sm font-medium text-[var(--foreground)] mb-2">Saved reviews</h4>
+                <div className="space-y-2">
+                  {pastReviews.map((review) => (
+                    <button
+                      key={`${review.reviewed_provider}~${review.reviewed_model}~${review.reviewer_provider}~${review.reviewer_model}`}
+                      type="button"
+                      onClick={() => setReviewContent(review.content)}
+                      className="block w-full text-left p-3 rounded-md border border-[var(--border-color)] hover:bg-[var(--background)] transition-colors"
+                    >
+                      <span className="text-sm text-[var(--foreground)]">
+                        {review.reviewed_provider}/{review.reviewed_model} reviewed by {review.reviewer_provider}/{review.reviewer_model}
+                      </span>
+                      {review.created_at && (
+                        <span className="block text-xs text-[var(--muted)] mt-1">
+                          {new Date(review.created_at).toLocaleString()}
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Footer */}
+          <div className="flex items-center justify-end gap-2 px-6 py-4 border-t border-[var(--border-color)]">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 text-sm font-medium rounded-md border border-[var(--border-color)]/50 text-[var(--muted)] bg-transparent hover:bg-[var(--background)] hover:text-[var(--foreground)] transition-colors"
+            >
+              Close
+            </button>
+            <button
+              type="button"
+              onClick={startReview}
+              disabled={isReviewing || pages.length === 0}
+              className="px-4 py-2 text-sm font-medium rounded-md border border-transparent bg-[var(--accent-primary)]/90 text-white hover:bg-[var(--accent-primary)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              {isReviewing ? 'Reviewing…' : 'Start Review'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+(If `@/types/wiki/wikipage`'s `WikiPage` differs from the page-local interface, import whichever the page already uses and keep the prop type consistent.)
+
+- [ ] **Step 3: Wire the button and modal into the wiki page**
+
+In `src/app/[owner]/[repo]/page.tsx`:
+
+(a) Import at top: `import WikiReviewModal from '@/components/WikiReviewModal';`
+
+(b) Add state next to `isModelSelectionModalOpen` (~line 2126):
+
+```typescript
+  const [isReviewModalOpen, setIsReviewModalOpen] = useState(false);
+```
+
+(c) Below the Export buttons block (`{Object.keys(generatedPages).length > 0 && (...)}` around line 2289), add a Model Review button with the same visibility condition:
+
+```tsx
+              {Object.keys(generatedPages).length > 0 && (
+                <div className="mb-5">
+                  <button
+                    onClick={() => setIsReviewModalOpen(true)}
+                    disabled={isLoading}
+                    className="flex items-center w-full text-xs px-3 py-2 bg-[var(--background)] text-[var(--foreground)] rounded-md hover:bg-[var(--background)]/80 disabled:opacity-50 disabled:cursor-not-allowed border border-[var(--border-color)] transition-colors hover:cursor-pointer"
+                  >
+                    Model Review
+                  </button>
+                </div>
+              )}
+```
+
+(d) Next to the `<ModelSelectionModal ... />` at the bottom (~line 2434), render:
+
+```tsx
+      <WikiReviewModal
+        isOpen={isReviewModalOpen}
+        onClose={() => setIsReviewModalOpen(false)}
+        repoInfo={effectiveRepoInfo}
+        language={language}
+        pages={wikiStructure ? wikiStructure.pages.map(p => generatedPages[p.id]).filter(Boolean) : []}
+        reviewedProvider={selectedProviderState}
+        reviewedModel={selectedModelState}
+        token={currentToken}
+      />
+```
+
+- [ ] **Step 4: Build**
+
+Run: `npm run build`
+Expected: completes with no TypeScript errors.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/components/WikiReviewModal.tsx next.config.ts src/app/\[owner\]/\[repo\]/page.tsx
+git commit -m "feat: in-app cross-model wiki review via existing chat pipeline"
+```
+
+---
+
+### Task 10: Full verification
 
 **Files:** none (verification only)
 
@@ -984,6 +1768,10 @@ Rebuild/restart the deployment the usual way (docker compose build/up for this H
 5. Open `/owner/repo` with no query params → the most recently generated version loads.
 6. Open the projects page (`/wiki/projects`): one row per version with provider/model badges; clicking a row opens that exact version; deleting a row removes only that version.
 7. Export wiki still works on whichever version is loaded (this is the manual-diff path).
+8. **Self-contained format:** inspect a `~provider~model` cache file — it contains `provider`, `model`, `generated_at`, and (for cloned repos) `repo_commit`. Download a markdown and a JSON export — both carry the same metadata (header lines / `metadata` block).
+9. **Retrieval:** `curl '<backend>/api/wiki_cache?owner=O&repo=R&repo_type=github&language=en&provider=claude&model=<model>'` returns the full version JSON — this is the artifact to hand to another LLM together with the repo.
+10. **Cross-model review:** with model A's wiki loaded, click **Model Review**, pick model B, Start Review. The review streams in, renders as markdown, and a `deepwiki_review_*~A~<modelA>~B~<modelB>.json` file appears. Re-open the modal — the saved review is listed and viewable. Run a second review with a different reviewer — both coexist.
+11. Confirm review files do NOT appear as rows on the processed-projects page.
 
 - [ ] **Step 3: Confirm pre-existing caches still load**
 
