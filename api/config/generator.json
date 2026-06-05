@@ -131,10 +131,11 @@
       "models": {
         "claude-sonnet-4-6": {
           "temperature": 0.3,
-          "max_tokens": 100000
+          "max_tokens": 64000
         },
         "claude-opus-4-8": {
-          "max_tokens": 100000
+          "max_tokens": 100000,
+          "thinking": "adaptive"
         },
         "claude-haiku-4-5-20251001": {
           "temperature": 0.3,

@@ -228,6 +228,13 @@ IMPORTANT FORMATTING RULES:
         from api.config import get_model_config
         generator_config = get_model_config(self.provider, self.model)
 
+        # "thinking" is a native Anthropic Messages API option consumed by the
+        # chat streaming paths; the adalflow generator here talks OpenAI-compat
+        # protocol, which would reject it as an unknown parameter.
+        generator_model_kwargs = {
+            k: v for k, v in generator_config["model_kwargs"].items() if k != "thinking"
+        }
+
         # Set up the main generator
         self.generator = adal.Generator(
             template=RAG_TEMPLATE,
@@ -238,7 +245,7 @@ IMPORTANT FORMATTING RULES:
                 "contexts": None,
             },
             model_client=generator_config["model_client"](),
-            model_kwargs=generator_config["model_kwargs"],
+            model_kwargs=generator_model_kwargs,
             output_processors=data_parser,
         )
 

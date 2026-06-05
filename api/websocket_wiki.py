@@ -24,7 +24,7 @@ from api.bedrock_client import BedrockClient
 from api.openai_client import OpenAIClient
 from api.litellm_client import LiteLLMClient
 from api.vllm_client import VLLMClient
-from api.claude_client import ClaudeClient
+from api.anthropic_client import AnthropicClient
 from api.openrouter_client import OpenRouterClient
 from api.azureai_client import AzureAIClient
 from api.dashscope_client import DashscopeClient
@@ -570,24 +570,25 @@ This file contains...
                 model_type=ModelType.LLM
             )
         elif request.provider == "claude":
-            logger.info(f"Using Claude (OpenAI-compat protocol) with model: {request.model}")
+            logger.info(f"Using Claude (native Anthropic SDK) with model: {request.model}")
 
             # OAuth bearer token from `claude setup-token` (CLAUDE_OAUTH_TOKEN)
-            model = ClaudeClient()
+            model = AnthropicClient()
             model_kwargs = {
                 "model": request.model,
-                "stream": True,
             }
-            # Only add sampling params / max_tokens if present in the model config.
-            # NOTE: Opus 4.7+ removed temperature/top_p/top_k (the API returns 400
-            # "temperature is deprecated for this model"), so those models must not
-            # have them in generator.json.
+            # Only add sampling params / max_tokens / thinking if present in the
+            # model config. NOTE: Opus 4.7+ removed temperature/top_p/top_k (the
+            # API returns 400), so those models must not have them in
+            # generator.json; "thinking": "adaptive" is recommended there instead.
             if "temperature" in model_config:
                 model_kwargs["temperature"] = model_config["temperature"]
             if "top_p" in model_config:
                 model_kwargs["top_p"] = model_config["top_p"]
             if "max_tokens" in model_config:
                 model_kwargs["max_tokens"] = model_config["max_tokens"]
+            if "thinking" in model_config:
+                model_kwargs["thinking"] = model_config["thinking"]
 
             api_kwargs = model.convert_inputs_to_api_kwargs(
                 input=prompt,
