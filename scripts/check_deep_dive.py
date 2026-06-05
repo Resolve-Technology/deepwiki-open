@@ -41,12 +41,35 @@ def cobol_paragraphs(src: str) -> list[str]:
     return out
 
 
-def ws_items(src: str) -> list[str]:
-    """01/77-level names in WORKING-STORAGE."""
+def ws_items(src: str) -> dict[str, list[str]]:
+    """01/77-level names in WORKING-STORAGE, mapped to their child field names.
+
+    A bare group container (e.g. ``01 CONTROL-TOTALS.``) counts as covered
+    when every non-FILLER child appears in the page, even if the umbrella
+    name itself was rendered as descriptive prose (common in zh output).
+    """
     m = re.search(r"WORKING-STORAGE\s+SECTION", src, re.IGNORECASE)
     n = re.search(r"PROCEDURE\s+DIVISION", src, re.IGNORECASE)
     body = src[m.end(): n.start() if n else None] if m else ""
-    return sorted(set(re.findall(r"^\s*(?:01|77)\s+([A-Z0-9][A-Z0-9-]+)", body, re.MULTILINE)))
+    items: dict[str, list[str]] = {}
+    current = None
+    for line in body.split("\n"):
+        top = re.match(r"^\s*(?:01|77)\s+([A-Z0-9][A-Z0-9-]+)", line)
+        if top:
+            current = top.group(1)
+            items.setdefault(current, [])
+            continue
+        child = re.match(r"^\s*\d\d\s+([A-Z0-9][A-Z0-9-]+)", line)
+        if child and current and child.group(1) != "FILLER":
+            items[current].append(child.group(1))
+    return items
+
+
+def ws_item_covered(name: str, children: list[str], content: str) -> bool:
+    """An item is covered if its name appears, or all its children do."""
+    if name in content:
+        return True
+    return bool(children) and all(c in content for c in children)
 
 
 def check_headings(content: str) -> list[str]:
@@ -84,7 +107,7 @@ def main():
     ok &= not missing_p
 
     items = ws_items(src)
-    missing_w = [w for w in items if w not in content]
+    missing_w = [w for w, kids in items.items() if not ws_item_covered(w, kids, content)]
     print(f"working-storage 01/77 coverage: {len(items) - len(missing_w)}/{len(items)}"
           + (f"  MISSING: {missing_w}" if missing_w else ""))
     ok &= not missing_w
