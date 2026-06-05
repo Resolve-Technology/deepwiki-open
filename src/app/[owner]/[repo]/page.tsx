@@ -4,6 +4,7 @@
 import Ask from '@/components/Ask';
 import Markdown from '@/components/Markdown';
 import ModelSelectionModal from '@/components/ModelSelectionModal';
+import WikiReviewModal from '@/components/WikiReviewModal';
 import ThemeToggle from '@/components/theme-toggle';
 import WikiTreeView from '@/components/WikiTreeView';
 import { useLanguage } from '@/contexts/LanguageContext';
@@ -2148,6 +2149,7 @@ IMPORTANT:
   };
 
   const [isModelSelectionModalOpen, setIsModelSelectionModalOpen] = useState(false);
+  const [isReviewModalOpen, setIsReviewModalOpen] = useState(false);
 
   return (
     <div className="h-screen paper-texture p-4 md:p-8 flex flex-col">
@@ -2341,6 +2343,18 @@ IMPORTANT:
                 </div>
               )}
 
+              {Object.keys(generatedPages).length > 0 && (
+                <div className="mb-5">
+                  <button
+                    onClick={() => setIsReviewModalOpen(true)}
+                    disabled={isLoading}
+                    className="flex items-center w-full text-xs px-3 py-2 bg-[var(--background)] text-[var(--foreground)] rounded-md hover:bg-[var(--background)]/80 disabled:opacity-50 disabled:cursor-not-allowed border border-[var(--border-color)] transition-colors hover:cursor-pointer"
+                  >
+                    Model Review
+                  </button>
+                </div>
+              )}
+
               <h4 className="text-md font-semibold text-[var(--foreground)] mb-3 font-serif">
                 {messages.repoPage?.pages || 'Pages'}
               </h4>
@@ -2486,6 +2500,16 @@ IMPORTANT:
         authCode={authCode}
         setAuthCode={setAuthCode}
         isAuthLoading={isAuthLoading}
+      />
+      <WikiReviewModal
+        isOpen={isReviewModalOpen}
+        onClose={() => setIsReviewModalOpen(false)}
+        repoInfo={effectiveRepoInfo}
+        language={language}
+        pages={wikiStructure ? wikiStructure.pages.map(p => generatedPages[p.id]).filter((p): p is WikiPage => Boolean(p)) : []}
+        reviewedProvider={selectedProviderState}
+        reviewedModel={selectedModelState}
+        token={currentToken}
       />
     </div>
   );
