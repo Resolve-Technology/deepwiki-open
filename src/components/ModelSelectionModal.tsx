@@ -18,6 +18,7 @@ interface ModelSelectionModalProps {
   customModel: string;
   setCustomModel: (value: string) => void;
   onApply: (token?: string) => void;
+  onForceRegenerate?: (token?: string) => void;
 
   // Wiki type options
   isComprehensiveView: boolean;
@@ -57,6 +58,7 @@ export default function ModelSelectionModal({
   customModel,
   setCustomModel,
   onApply,
+  onForceRegenerate,
   isComprehensiveView,
   setIsComprehensiveView,
   excludedDirs = '',
@@ -112,8 +114,8 @@ export default function ModelSelectionModal({
     }
   }, [isOpen, provider, model, isCustomModel, customModel, isComprehensiveView, excludedDirs, excludedFiles, includedDirs, includedFiles, repositoryType, showTokenInput]);
 
-  // Handler for applying changes
-  const handleApply = () => {
+  // Commits the local form state to the parent and returns the token (if any)
+  const commitSelections = () => {
     setProvider(localProvider);
     setModel(localModel);
     setIsCustomModel(localIsCustomModel);
@@ -123,13 +125,20 @@ export default function ModelSelectionModal({
     if (setExcludedFiles) setExcludedFiles(localExcludedFiles);
     if (setIncludedDirs) setIncludedDirs(localIncludedDirs);
     if (setIncludedFiles) setIncludedFiles(localIncludedFiles);
-    
-    // Pass token to onApply if needed
-    if (showTokenInput) {
-      onApply(localAccessToken);
-    } else {
-      onApply();
-    }
+    return showTokenInput ? localAccessToken : undefined;
+  };
+
+  // Handler for applying changes (loads the saved wiki for this model if one exists)
+  const handleApply = () => {
+    const token = commitSelections();
+    onApply(token);
+    onClose();
+  };
+
+  // Handler for forcing regeneration (deletes this model's saved wiki first)
+  const handleForceRegenerate = () => {
+    const token = commitSelections();
+    onForceRegenerate?.(token);
     onClose();
   };
 
@@ -244,6 +253,16 @@ export default function ModelSelectionModal({
             >
               {t.common?.cancel || 'Cancel'}
             </button>
+            {onForceRegenerate && (
+              <button
+                type="button"
+                onClick={handleForceRegenerate}
+                title={t.form?.regenerateTooltip || 'Discard this model\'s saved wiki and generate it again'}
+                className="px-4 py-2 text-sm font-medium rounded-md border border-[var(--accent-primary)]/50 text-[var(--accent-primary)] bg-transparent hover:bg-[var(--accent-primary)]/10 transition-colors"
+              >
+                {t.form?.regenerate || 'Regenerate'}
+              </button>
+            )}
             <button
               type="button"
               onClick={handleApply}

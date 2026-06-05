@@ -246,6 +246,7 @@ export default function RepoWikiPage() {
   const [isCustomSelectedModelState, setIsCustomSelectedModelState] = useState(isCustomModelParam);
   const [customSelectedModelState, setCustomSelectedModelState] = useState(customModelParam);
   const [showModelOptions, setShowModelOptions] = useState(false); // Controls whether to show model options
+  const [refreshNonce, setRefreshNonce] = useState(0);
   const excludedDirs = searchParams.get('excluded_dirs') || '';
   const excludedFiles = searchParams.get('excluded_files') || '';
   const [modelExcludedDirs, setModelExcludedDirs] = useState(excludedDirs);
@@ -1759,71 +1760,76 @@ IMPORTANT:
 
   // No longer needed as we use the modal directly
 
-  const confirmRefresh = useCallback(async (newToken?: string) => {
+  const confirmRefresh = useCallback(async (newToken?: string, forceRegenerate: boolean = false) => {
     setShowModelOptions(false);
     setLoadingMessage(messages.loading?.clearingCache || 'Clearing server cache...');
     setIsLoading(true); // Show loading indicator immediately
 
-    try {
-      const params = new URLSearchParams({
-        owner: effectiveRepoInfo.owner,
-        repo: effectiveRepoInfo.repo,
-        repo_type: effectiveRepoInfo.type,
-        language: language,
-        provider: selectedProviderState,
-        model: selectedModelState,
-        is_custom_model: isCustomSelectedModelState.toString(),
-        custom_model: customSelectedModelState,
-        comprehensive: isComprehensiveView.toString(),
-        authorization_code: authCode,
-      });
-
-      // Add file filters configuration
-      if (modelExcludedDirs) {
-        params.append('excluded_dirs', modelExcludedDirs);
-      }
-      if (modelExcludedFiles) {
-        params.append('excluded_files', modelExcludedFiles);
-      }
-
-      if(authRequired && !authCode) {
-        setIsLoading(false);
-        console.error("Authorization code is required");
-        setError('Authorization code is required');
-        return;
-      }
-
-      const response = await fetch(`/api/wiki_cache?${params.toString()}`, {
-        method: 'DELETE',
-        headers: {
-          'Accept': 'application/json',
-        }
-      });
-
-      if (response.ok) {
-        console.log('Server-side wiki cache cleared successfully.');
-        // Optionally, show a success message for cache clearing if desired
-        // setLoadingMessage('Cache cleared. Refreshing wiki...');
-      } else {
-        const errorText = await response.text();
-        console.warn(`Failed to clear server-side wiki cache (status: ${response.status}): ${errorText}. Proceeding with refresh anyway.`);
-        // Optionally, inform the user about the cache clear failure but that refresh will still attempt
-        // setError(\`Cache clear failed: ${errorText}. Trying to refresh...\`);
-        if(response.status == 401) {
-          setIsLoading(false);
-          setLoadingMessage(undefined);
-          setError('Failed to validate the authorization code');
-          console.error('Failed to validate the authorization code')
-          return;
-        }
-      }
-    } catch (err) {
-      console.warn('Error calling DELETE /api/wiki_cache:', err);
+    if (authRequired && !authCode) {
       setIsLoading(false);
-      setEmbeddingError(false); // Reset embedding error state
-      // Optionally, inform the user about the cache clear error
-      // setError(\`Error clearing cache: ${err instanceof Error ? err.message : String(err)}. Trying to refresh...\`);
-      throw err;
+      console.error("Authorization code is required");
+      setError('Authorization code is required');
+      return;
+    }
+
+    // Without forceRegenerate we keep the saved version on the server: the reset
+    // below re-runs loadData, which loads the selected provider/model's cached wiki
+    // if it exists and only generates on a miss.
+    if (forceRegenerate) {
+      try {
+        const params = new URLSearchParams({
+          owner: effectiveRepoInfo.owner,
+          repo: effectiveRepoInfo.repo,
+          repo_type: effectiveRepoInfo.type,
+          language: language,
+          provider: selectedProviderState,
+          model: selectedModelState,
+          is_custom_model: isCustomSelectedModelState.toString(),
+          custom_model: customSelectedModelState,
+          comprehensive: isComprehensiveView.toString(),
+          authorization_code: authCode,
+        });
+
+        // Add file filters configuration
+        if (modelExcludedDirs) {
+          params.append('excluded_dirs', modelExcludedDirs);
+        }
+        if (modelExcludedFiles) {
+          params.append('excluded_files', modelExcludedFiles);
+        }
+
+        const response = await fetch(`/api/wiki_cache?${params.toString()}`, {
+          method: 'DELETE',
+          headers: {
+            'Accept': 'application/json',
+          }
+        });
+
+        if (response.ok) {
+          console.log('Server-side wiki cache cleared successfully.');
+          // Optionally, show a success message for cache clearing if desired
+          // setLoadingMessage('Cache cleared. Refreshing wiki...');
+        } else {
+          const errorText = await response.text();
+          console.warn(`Failed to clear server-side wiki cache (status: ${response.status}): ${errorText}. Proceeding with refresh anyway.`);
+          // Optionally, inform the user about the cache clear failure but that refresh will still attempt
+          // setError(\`Cache clear failed: ${errorText}. Trying to refresh...\`);
+          if(response.status == 401) {
+            setIsLoading(false);
+            setLoadingMessage(undefined);
+            setError('Failed to validate the authorization code');
+            console.error('Failed to validate the authorization code')
+            return;
+          }
+        }
+      } catch (err) {
+        console.warn('Error calling DELETE /api/wiki_cache:', err);
+        setIsLoading(false);
+        setEmbeddingError(false); // Reset embedding error state
+        // Optionally, inform the user about the cache clear error
+        // setError(\`Error clearing cache: ${err instanceof Error ? err.message : String(err)}. Trying to refresh...\`);
+        throw err;
+      }
     }
 
     // Update token if provided
@@ -1846,6 +1852,7 @@ IMPORTANT:
     // Reset cache loaded flag
     cacheLoadedSuccessfully.current = false;
     effectRan.current = false; // Allow the main data loading useEffect to run again
+    setRefreshNonce(n => n + 1); // force the load effect to re-run even if no dep changed
 
     // Reset all state
     setWikiStructure(undefined);
@@ -1889,6 +1896,13 @@ IMPORTANT:
             language: language,
             comprehensive: isComprehensiveView.toString(),
           });
+          // When a specific provider/model is selected (from URL params or the model
+          // selector), load that exact cached version; otherwise the backend returns
+          // the most recently generated one.
+          if (selectedProviderState && selectedModelState) {
+            params.append('provider', selectedProviderState);
+            params.append('model', selectedModelState);
+          }
           const response = await fetch(`/api/wiki_cache?${params.toString()}`);
 
           if (response.ok) {
@@ -2060,7 +2074,7 @@ IMPORTANT:
 
     // Clean up function for this effect is not strictly necessary for loadData,
     // but keeping the main unmount cleanup in the other useEffect
-  }, [effectiveRepoInfo, effectiveRepoInfo.owner, effectiveRepoInfo.repo, effectiveRepoInfo.type, language, fetchRepositoryStructure, messages.loading?.fetchingCache, isComprehensiveView]);
+  }, [effectiveRepoInfo, effectiveRepoInfo.owner, effectiveRepoInfo.repo, effectiveRepoInfo.type, language, fetchRepositoryStructure, messages.loading?.fetchingCache, isComprehensiveView, selectedProviderState, selectedModelState, refreshNonce]);
 
   // Save wiki to server-side cache when generation is complete
   useEffect(() => {
@@ -2453,7 +2467,8 @@ IMPORTANT:
         setIncludedDirs={setModelIncludedDirs}
         includedFiles={modelIncludedFiles}
         setIncludedFiles={setModelIncludedFiles}
-        onApply={confirmRefresh}
+        onApply={(token?: string) => confirmRefresh(token, false)}
+        onForceRegenerate={(token?: string) => confirmRefresh(token, true)}
         showWikiType={true}
         showTokenInput={effectiveRepoInfo.type !== 'local' && !currentToken} // Show token input if not local and no current token
         repositoryType={effectiveRepoInfo.type as 'github' | 'gitlab' | 'bitbucket'}
