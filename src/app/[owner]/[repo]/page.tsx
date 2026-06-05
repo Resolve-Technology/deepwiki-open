@@ -10,6 +10,7 @@ import WikiTreeView from '@/components/WikiTreeView';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { RepoInfo } from '@/types/repoinfo';
 import getRepoUrl from '@/utils/getRepoUrl';
+import { getWebSocketUrl } from '@/utils/websocketClient';
 import { extractUrlDomain, extractUrlPath } from '@/utils/urlDecoder';
 import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
@@ -668,10 +669,8 @@ IMPORTANT: Generate the content in ${language === 'en' ? 'English' :
         let ws: WebSocket | undefined;
 
         try {
-          // Create WebSocket URL from the server base URL
-          const serverBaseUrl = process.env.SERVER_BASE_URL || 'http://localhost:8001';
-          const wsBaseUrl = serverBaseUrl.replace(/^http(s?):/i, 'ws$1:');
-          const wsUrl = `${wsBaseUrl}/ws/chat`;
+          // Resolve the WebSocket URL (runtime-configured; follows the page host)
+          const wsUrl = getWebSocketUrl();
 
           // Create a new WebSocket connection
           ws = new WebSocket(wsUrl);
@@ -1000,10 +999,8 @@ IMPORTANT:
       responseText = '';
 
       try {
-        // Create WebSocket URL from the server base URL
-        const serverBaseUrl = process.env.SERVER_BASE_URL || 'http://localhost:8001';
-        const wsBaseUrl = serverBaseUrl.replace(/^http/, 'ws')? serverBaseUrl.replace(/^https/, 'wss'): serverBaseUrl.replace(/^http/, 'ws');
-        const wsUrl = `${wsBaseUrl}/ws/chat`;
+        // Resolve the WebSocket URL (runtime-configured; follows the page host)
+        const wsUrl = getWebSocketUrl();
 
         // Create a new WebSocket connection
         const ws = new WebSocket(wsUrl);

@@ -6,12 +6,39 @@
 // Get the server base URL from environment or use default
 const SERVER_BASE_URL = process.env.SERVER_BASE_URL || 'http://localhost:8001';
 
-// Convert HTTP URL to WebSocket URL
-const getWebSocketUrl = () => {
-  const baseUrl = SERVER_BASE_URL;
-  // Replace http:// with ws:// or https:// with wss://
-  const wsBaseUrl = baseUrl.replace(/^http/, 'ws');
-  return `${wsBaseUrl}/ws/chat`;
+// The browser connects to the API directly (the Next.js rewrites can't proxy
+// websockets), and the API's public port varies per deployment (e.g. 8001 in
+// production, 8002 on a staging container). That port is runtime config on the
+// Next server, so fetch it once and cache it. Until the fetch resolves we fall
+// back to the page's own host on port 8001 — the compose default.
+let runtimeWsBase: string | null = null;
+
+if (typeof window !== 'undefined') {
+  fetch('/api/wsconfig')
+    .then(res => (res.ok ? res.json() : null))
+    .then(config => {
+      if (config?.wsBaseUrl) {
+        runtimeWsBase = config.wsBaseUrl.replace(/^http/, 'ws');
+      } else if (config?.apiPort) {
+        const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+        runtimeWsBase = `${proto}://${window.location.hostname}:${config.apiPort}`;
+      }
+    })
+    .catch(() => { /* keep the same-host fallback */ });
+}
+
+// Resolve the websocket URL for the chat endpoint
+export const getWebSocketUrl = () => {
+  if (runtimeWsBase) {
+    return `${runtimeWsBase}/ws/chat`;
+  }
+  if (typeof window !== 'undefined') {
+    // Same host as the page, default API port
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    return `${proto}://${window.location.hostname}:8001/ws/chat`;
+  }
+  // Server-side: replace http:// with ws:// or https:// with wss://
+  return `${SERVER_BASE_URL.replace(/^http/, 'ws')}/ws/chat`;
 };
 
 export interface ChatMessage {
