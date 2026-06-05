@@ -113,10 +113,17 @@ the repo) to another LLM:
   newest first).
 - **Frontend:** a "Model Review" button (next to Export) opens `WikiReviewModal`:
   pick a reviewer provider/model (reusing `UserSelector`), the modal builds a review prompt
-  containing the loaded wiki's pages (per-page truncation against a ~200k-char budget) and
-  streams the review through the existing `/ws/chat` pipeline — RAG supplies the *same
-  repository's* code context to the reviewer. The finished review renders as markdown, is
-  saved via `POST /api/wiki_review`, and past reviews are listed in the modal.
+  containing the loaded wiki's pages (per-page truncation plus a hard total cap at ~80k
+  chars ≈ 20k tokens, so 32k-context reviewers fit) and streams the review through the
+  existing `/ws/chat` pipeline — RAG supplies the *same repository's* code context to the
+  reviewer. The finished review renders as markdown, is saved via `POST /api/wiki_review`,
+  and past reviews are listed in the modal.
+- **RAG with oversized prompts:** `/ws/chat` skips retrieval entirely when the last message
+  exceeds 8000 tokens (`websocket_wiki.py`), which every review prompt does. The request
+  gains an optional `rag_query` field — a *short* retrieval query (page titles + key file
+  paths) supplied by the review modal. When present, retrieval runs with it regardless of
+  prompt size, so the reviewer still gets real code context; `fit_to_budget` keeps the
+  retrieved context within the model's window as today.
 - `next.config.ts` gains a rewrite for `/api/wiki_review` → backend.
 
 ### Error handling & edge cases

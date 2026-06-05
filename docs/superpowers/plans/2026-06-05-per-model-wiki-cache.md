@@ -12,8 +12,12 @@
 
 **Conventions for all tasks:**
 - Run all commands from `/home/ubuntu/deepwiki-open`.
-- Backend tests: `python -m pytest tests/unit/test_wiki_cache_versions.py -v` (note: `pytest.ini` has `testpaths = test`, so the path must be explicit).
-- The python interpreter that runs the backend should be used; if `python` lacks deps, try `python3` or the venv used by the API container.
+- **Backend test runtime (one-time setup):** the host has no fastapi/pytest and the container image only ships `api/` (no `test/`/`tests/`), so create a host venv first:
+  ```bash
+  python3 -m venv .venv
+  .venv/bin/pip install ./api pytest   # api/pyproject.toml is poetry-core; pip resolves its dependencies
+  ```
+  Wherever a task says `python`, use `.venv/bin/python`. Backend tests: `.venv/bin/python -m pytest tests/unit/test_wiki_cache_versions.py -v` (note: `pytest.ini` has `testpaths = test`, so the path must be explicit).
 
 ---
 
@@ -23,10 +27,14 @@
 - Modify: `api/api.py` (helpers around lines 428–445; `ProcessedProjectEntry` at lines 59–66)
 - Create: `tests/unit/test_wiki_cache_versions.py`
 
-- [ ] **Step 1: Verify `api.api` imports cleanly in the test environment**
+- [ ] **Step 1: Set up the test venv and verify `api.api` imports cleanly**
 
-Run: `python -c "from api.api import get_wiki_cache_path; print('ok')"`
-Expected: `ok` (config loading log lines are fine). If this fails with missing env vars, export the same env the API container uses before running tests.
+```bash
+python3 -m venv .venv
+.venv/bin/pip install ./api pytest
+.venv/bin/python -c "from api.api import get_wiki_cache_path; print('ok')"
+```
+Expected: `ok` (config loading log lines are fine). If the import fails, the error will name the missing dependency — install it into `.venv` and retry. Do not skip this; every backend test step depends on it.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -626,15 +634,31 @@ In the `loadData` function (`src/app/[owner]/[repo]/page.tsx:1885-1892`), replac
           const response = await fetch(`/api/wiki_cache?${params.toString()}`);
 ```
 
-- [ ] **Step 2: Add the new state values to the effect dependency array**
+- [ ] **Step 2: Make the load effect re-run reliably after a refresh**
 
-At the end of that `useEffect` (`src/app/[owner]/[repo]/page.tsx:2063`), extend the deps:
+How the reload actually triggers: the effect body is gated by `effectRan.current`, which only `confirmRefresh` resets to `false` — but resetting the guard does NOT re-run the effect; a dependency must also change. When the user picked a *different* provider/model, the new deps below provide that change. When provider/model are *unchanged* (e.g. same-model Regenerate), nothing in the dep array changes, so an explicit nonce that `confirmRefresh` bumps is needed too.
+
+(a) Add state near the other state declarations (~line 244):
 
 ```typescript
-  }, [effectiveRepoInfo, effectiveRepoInfo.owner, effectiveRepoInfo.repo, effectiveRepoInfo.type, language, fetchRepositoryStructure, messages.loading?.fetchingCache, isComprehensiveView, selectedProviderState, selectedModelState]);
+  const [refreshNonce, setRefreshNonce] = useState(0);
 ```
 
-(The `effectRan.current` guard keeps this from re-running on ordinary state changes — e.g. when a cache load itself calls `setSelectedModelState`. Only `confirmRefresh` resets the guard.)
+(b) In `confirmRefresh`, immediately after `effectRan.current = false;` (~line 1848), add:
+
+```typescript
+    setRefreshNonce(n => n + 1); // force the load effect to re-run even if no dep changed
+```
+
+(`setRefreshNonce` is a stable setter — it does not need to be in `confirmRefresh`'s dependency array.)
+
+(c) At the end of the load `useEffect` (`src/app/[owner]/[repo]/page.tsx:2063`), extend the deps:
+
+```typescript
+  }, [effectiveRepoInfo, effectiveRepoInfo.owner, effectiveRepoInfo.repo, effectiveRepoInfo.type, language, fetchRepositoryStructure, messages.loading?.fetchingCache, isComprehensiveView, selectedProviderState, selectedModelState, refreshNonce]);
+```
+
+(The `effectRan.current` guard keeps these extra deps from re-running the load on ordinary state changes — e.g. when a cache load itself calls `setSelectedModelState`, the effect re-fires but the guard short-circuits it. Only `confirmRefresh` resets the guard.)
 
 - [ ] **Step 3: Make cache deletion conditional on a `forceRegenerate` flag**
 
@@ -904,7 +928,12 @@ In `src/components/ProcessedProjects.tsx`, replace `handleDelete` (lines 104-128
         const errorBody = await response.json().catch(() => ({ error: response.statusText }));
         throw new Error(errorBody.error || response.statusText);
       }
-      setProjects(prev => prev.filter(p => p.id !== project.id));
+      // A version row deletes only itself; a legacy row deletes ALL of the repo's
+      // cache files server-side, so drop every sibling row for that repo too.
+      setProjects(prev => hasVersion
+        ? prev.filter(p => p.id !== project.id)
+        : prev.filter(p => !(p.owner === project.owner && p.repo === project.repo &&
+            p.repo_type === project.repo_type && p.language === project.language)));
     } catch (e: unknown) {
       console.error('Failed to delete project:', e);
       alert(`Failed to delete project: ${e instanceof Error ? e.message : 'Unknown error'}`);
@@ -1201,6 +1230,8 @@ In `src/app/[owner]/[repo]/page.tsx`:
             } else {
 ```
 
+Also add `selectedProviderState, selectedModelState` to the `saveCache` effect's dependency array (line ~2118) — the POST body reads them via closure and the array currently omits them (pre-existing staleness this task would otherwise inherit).
+
 (d) In `exportWiki` (`page.tsx:1715-1720`), extend the request body:
 
 ```typescript
@@ -1381,11 +1412,40 @@ async def get_wiki_reviews(
 Run: `python -m pytest tests/unit/test_wiki_cache_versions.py -v`
 Expected: ALL tests PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Let large review prompts still get RAG code context (`api/websocket_wiki.py`)**
+
+**Why:** `handle_websocket_chat` sets `input_too_large = True` when the last message exceeds 8000 tokens (`api/websocket_wiki.py:87-89`) and then skips RAG retrieval entirely (`:201 if not input_too_large:`). A review prompt embedding the wiki always trips this, so the reviewer model would get NO repository code context — defeating the feature. Fix: an explicit, *short* retrieval query supplied by the caller bypasses the gate (the gate exists to stop huge strings being used as the retrieval query, which the short `rag_query` doesn't do).
+
+In `ChatCompletionRequest` (`api/websocket_wiki.py`, after the `model` field at line 60), add:
+
+```python
+    rag_query: Optional[str] = Field(None, description="Optional short query used for RAG retrieval instead of the last message; lets oversized prompts still receive repository context")
+```
+
+Replace the retrieval gate and query selection (`api/websocket_wiki.py:201-208`):
+
+```python
+        if not input_too_large or request.rag_query:
+            try:
+                # Choose the retrieval query: an explicit short rag_query wins,
+                # then a filePath-focused query, then the message itself.
+                if request.rag_query:
+                    rag_query = request.rag_query
+                    logger.info("Using explicit rag_query for retrieval")
+                elif request.filePath:
+                    rag_query = f"Contexts related to {request.filePath}"
+                    logger.info(f"Modified RAG query to focus on file: {request.filePath}")
+                else:
+                    rag_query = query
+```
+
+(The rest of that block — `request_rag(rag_query, ...)` and the context formatting — is unchanged. `fit_to_budget` already trims `context_text` to the model's budget downstream, so retrieved context cannot blow up the prompt further.)
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add api/api.py tests/unit/test_wiki_cache_versions.py
-git commit -m "feat: wiki review storage and endpoints for cross-model review"
+git add api/api.py api/websocket_wiki.py tests/unit/test_wiki_cache_versions.py
+git commit -m "feat: wiki review storage, endpoints, and rag_query for large review prompts"
 ```
 
 ---
@@ -1408,7 +1468,15 @@ In `next.config.ts`, inside `async rewrites()`, after the `/api/wiki_cache` entr
       },
 ```
 
-- [ ] **Step 2: Create `src/components/WikiReviewModal.tsx`**
+- [ ] **Step 2: Add `rag_query` to the websocket client request type**
+
+In `src/utils/websocketClient.ts`, extend `ChatCompletionRequest` (after `model?: string;` at line 29):
+
+```typescript
+  rag_query?: string;
+```
+
+- [ ] **Step 3: Create `src/components/WikiReviewModal.tsx`**
 
 ```tsx
 'use client';
@@ -1421,9 +1489,10 @@ import getRepoUrl from '@/utils/getRepoUrl';
 import { createChatWebSocket, closeWebSocket, ChatCompletionRequest } from '@/utils/websocketClient';
 import { WikiPage } from '@/types/wiki/wikipage';
 
-// Char budget for wiki content embedded in the review prompt; pages are
-// truncated proportionally so the request fits smaller reviewer contexts too.
-const MAX_REVIEW_CHARS = 200_000;
+// Char budget for wiki content embedded in the review prompt (~20k tokens),
+// sized so smaller reviewer models (e.g. 32k-context vLLM) still fit the
+// request. Pages are truncated proportionally AND the total is hard-capped.
+const MAX_REVIEW_CHARS = 80_000;
 
 interface WikiReview {
   repo: RepoInfo;
@@ -1485,14 +1554,26 @@ export default function WikiReviewModal({
   // Close any in-flight websocket on unmount
   useEffect(() => () => closeWebSocket(webSocketRef.current), []);
 
+  // Short retrieval query so the backend can fetch code context via RAG even
+  // though the full review prompt exceeds the websocket's large-input gate.
+  const buildRagQuery = useCallback(() => {
+    const titles = pages.map(p => p.title).join('; ').slice(0, 1000);
+    const files = [...new Set(pages.flatMap(p => p.filePaths))].slice(0, 50).join(', ');
+    return `Source code relevant to documentation covering: ${titles}. Key files: ${files}`.slice(0, 4000);
+  }, [pages]);
+
   const buildReviewPrompt = useCallback(() => {
     const perPageBudget = Math.max(2000, Math.floor(MAX_REVIEW_CHARS / Math.max(pages.length, 1)));
-    const wikiText = pages.map(page => {
+    let wikiText = pages.map(page => {
       const body = page.content.length > perPageBudget
         ? page.content.slice(0, perPageBudget) + '\n\n...[truncated for review]'
         : page.content;
       return `<page title="${page.title}" files="${page.filePaths.join(', ')}">\n${body}\n</page>`;
     }).join('\n\n');
+    if (wikiText.length > MAX_REVIEW_CHARS) {
+      // Hard cap: per-page minimums can overshoot on wikis with many pages
+      wikiText = wikiText.slice(0, MAX_REVIEW_CHARS) + '\n\n...[wiki truncated for review]';
+    }
     return `You are reviewing AI-generated wiki documentation for the repository ${getRepoUrl(repoInfo)}.
 The wiki below was generated by ${reviewedProvider}/${reviewedModel}. You have access to the repository's actual source code through the provided context — use it to verify claims.
 
@@ -1564,6 +1645,7 @@ ${wikiText}
       model: effectiveModel,
       language: language,
       token: token,
+      rag_query: buildRagQuery(),
     };
 
     let content = '';
@@ -1584,7 +1666,7 @@ ${wikiText}
         }
       },
     );
-  }, [reviewerProvider, reviewerModel, isCustomModel, customModel, repoInfo, language, token, buildReviewPrompt, saveReview]);
+  }, [reviewerProvider, reviewerModel, isCustomModel, customModel, repoInfo, language, token, buildReviewPrompt, buildRagQuery, saveReview]);
 
   if (!isOpen) return null;
 
@@ -1691,7 +1773,9 @@ ${wikiText}
 
 (If `@/types/wiki/wikipage`'s `WikiPage` differs from the page-local interface, import whichever the page already uses and keep the prop type consistent.)
 
-- [ ] **Step 3: Wire the button and modal into the wiki page**
+Known limitation (accepted): the modal's labels and review prompt are English-only — unlike other components it does not use `useLanguage()`, and `form.regenerate` (Task 5) relies on its English fallback since no locale file defines it. Fine for this single-user deployment; add message keys later if localization matters.
+
+- [ ] **Step 4: Wire the button and modal into the wiki page**
 
 In `src/app/[owner]/[repo]/page.tsx`:
 
@@ -1734,15 +1818,15 @@ In `src/app/[owner]/[repo]/page.tsx`:
       />
 ```
 
-- [ ] **Step 4: Build**
+- [ ] **Step 5: Build**
 
 Run: `npm run build`
 Expected: completes with no TypeScript errors.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/components/WikiReviewModal.tsx next.config.ts src/app/\[owner\]/\[repo\]/page.tsx
+git add src/components/WikiReviewModal.tsx src/utils/websocketClient.ts next.config.ts src/app/\[owner\]/\[repo\]/page.tsx
 git commit -m "feat: in-app cross-model wiki review via existing chat pipeline"
 ```
 
@@ -1754,8 +1838,8 @@ git commit -m "feat: in-app cross-model wiki review via existing chat pipeline"
 
 - [ ] **Step 1: Run the whole backend test suite touchpoints**
 
-Run: `python -m pytest tests/unit/test_wiki_cache_versions.py -v && python -m pytest test -v`
-Expected: all PASS (the `test/` dir is the repo's default pytest target; it must stay green).
+Run: `.venv/bin/python -m pytest tests/unit/test_wiki_cache_versions.py -v && .venv/bin/python -m pytest test -v`
+Expected: all PASS (the new version/review/metadata tests, plus `test/` — the repo's default pytest target — must stay green). Don't run all of `tests/` blindly: some pre-existing tests there need live API keys.
 
 - [ ] **Step 2: Rebuild and manually verify (deployment is containerized — code changes need a rebuild)**
 
@@ -1770,7 +1854,7 @@ Rebuild/restart the deployment the usual way (docker compose build/up for this H
 7. Export wiki still works on whichever version is loaded (this is the manual-diff path).
 8. **Self-contained format:** inspect a `~provider~model` cache file — it contains `provider`, `model`, `generated_at`, and (for cloned repos) `repo_commit`. Download a markdown and a JSON export — both carry the same metadata (header lines / `metadata` block).
 9. **Retrieval:** `curl '<backend>/api/wiki_cache?owner=O&repo=R&repo_type=github&language=en&provider=claude&model=<model>'` returns the full version JSON — this is the artifact to hand to another LLM together with the repo.
-10. **Cross-model review:** with model A's wiki loaded, click **Model Review**, pick model B, Start Review. The review streams in, renders as markdown, and a `deepwiki_review_*~A~<modelA>~B~<modelB>.json` file appears. Re-open the modal — the saved review is listed and viewable. Run a second review with a different reviewer — both coexist.
+10. **Cross-model review:** with model A's wiki loaded, click **Model Review**, pick model B, Start Review. The review streams in, renders as markdown, and a `deepwiki_review_*~A~<modelA>~B~<modelB>.json` file appears. Re-open the modal — the saved review is listed and viewable. Run a second review with a different reviewer — both coexist. **Crucially, check the backend log during the review:** it must show `Using explicit rag_query for retrieval` followed by `Retrieved N documents` — that proves the reviewer received the repo's actual code context despite the oversized prompt (the 8000-token gate would otherwise have skipped RAG silently).
 11. Confirm review files do NOT appear as rows on the processed-projects page.
 
 - [ ] **Step 3: Confirm pre-existing caches still load**
