@@ -1,5 +1,6 @@
 import os
 import re
+import glob
 import logging
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
@@ -431,18 +432,80 @@ WIKI_CACHE_DIR = os.path.join(get_adalflow_default_root_path(), "wikicache")
 os.makedirs(WIKI_CACHE_DIR, exist_ok=True)
 
 _SAFE_CACHE_SEGMENT = re.compile(r'^[A-Za-z0-9._-]+$')
+# Chars allowed in the provider/model filename segments. NOTE: no '~' and no '_',
+# so '~' stays an unambiguous separator and parsing the base segments keeps working.
+_VERSION_SEGMENT_UNSAFE = re.compile(r'[^A-Za-z0-9.-]')
 
-def get_wiki_cache_path(owner: str, repo: str, repo_type: str, language: str) -> str:
-    """Generates the file path for a given wiki cache, with path-traversal guards."""
+def sanitize_version_segment(value: Optional[str]) -> str:
+    """Sanitizes a provider/model identifier for use in a cache filename.
+
+    Replaces every char outside [A-Za-z0-9.-] with '-' (e.g. 'Qwen/Qwen3-32B'
+    -> 'Qwen-Qwen3-32B'). Idempotent, so values parsed back out of filenames can
+    be passed in again. Returns '' for empty/None input.
+    """
+    if not value:
+        return ""
+    return _VERSION_SEGMENT_UNSAFE.sub('-', value.strip()).strip('-')
+
+def get_wiki_cache_path(owner: str, repo: str, repo_type: str, language: str,
+                        provider: Optional[str] = None, model: Optional[str] = None) -> str:
+    """Generates the file path for a given wiki cache, with path-traversal guards.
+
+    When both provider and model are given, the filename carries a
+    '~{provider}~{model}' suffix so each model's wiki is cached separately.
+    Without them it resolves to the legacy (un-versioned) filename.
+    """
     for seg in (owner, repo, repo_type, language):
         if not seg or seg in ('.', '..') or not _SAFE_CACHE_SEGMENT.match(seg):
             raise HTTPException(status_code=400, detail="Invalid repository identifier.")
-    filename = f"deepwiki_cache_{repo_type}_{owner}_{repo}_{language}.json"
+    filename = f"deepwiki_cache_{repo_type}_{owner}_{repo}_{language}"
+    provider_seg = sanitize_version_segment(provider)
+    model_seg = sanitize_version_segment(model)
+    if provider_seg and model_seg:
+        filename += f"~{provider_seg}~{model_seg}"
+    filename += ".json"
     path = os.path.join(WIKI_CACHE_DIR, filename)
     # Containment backstop: the resolved path must stay inside the cache directory.
     if not os.path.realpath(path).startswith(os.path.realpath(WIKI_CACHE_DIR) + os.sep):
         raise HTTPException(status_code=400, detail="Invalid cache path.")
     return path
+
+def list_wiki_cache_paths(owner: str, repo: str, repo_type: str, language: str) -> List[str]:
+    """All cache files for a repo (legacy + per-model versions), newest first."""
+    legacy_path = get_wiki_cache_path(owner, repo, repo_type, language)
+    base = legacy_path[:-len(".json")]
+    # Base segments are restricted to [A-Za-z0-9._-], so they contain no glob metachars.
+    paths = glob.glob(f"{base}~*~*.json")
+    if os.path.exists(legacy_path):
+        paths.append(legacy_path)
+    paths.sort(key=os.path.getmtime, reverse=True)
+    return paths
+
+def parse_wiki_cache_filename(filename: str) -> Optional[Dict[str, Optional[str]]]:
+    """Parses a wiki cache filename into its components.
+
+    Handles both legacy names (deepwiki_cache_{type}_{owner}_{repo}_{lang}.json)
+    and versioned names (...~{provider}~{model}.json). Returns None if the
+    filename is not a parseable cache file.
+    """
+    if not (filename.startswith("deepwiki_cache_") and filename.endswith(".json")):
+        return None
+    stem = filename[:-len(".json")]
+    version_parts = stem.split('~')
+    provider = version_parts[1] if len(version_parts) == 3 else None
+    model = version_parts[2] if len(version_parts) == 3 else None
+    parts = version_parts[0].replace("deepwiki_cache_", "").split('_')
+    # Expecting repo_type_owner_repo_language; repo can contain underscores.
+    if len(parts) < 4:
+        return None
+    return {
+        "repo_type": parts[0],
+        "owner": parts[1],
+        "repo": "_".join(parts[2:-1]),
+        "language": parts[-1],
+        "provider": provider,
+        "model": model,
+    }
 
 async def read_wiki_cache(owner: str, repo: str, repo_type: str, language: str) -> Optional[WikiCacheData]:
     """Reads wiki cache data from the file system."""
