@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from api.config import get_model_config, configs, OPENROUTER_API_KEY, OPENAI_API_KEY, LITELLM_API_KEY, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
 from api.data_pipeline import count_tokens, get_file_content
+from api.prompt_fit import fit_to_budget, prompt_token_budget
 from api.openai_client import OpenAIClient
 from api.vllm_client import VLLMClient
 from api.claude_client import ClaudeClient
@@ -313,6 +314,17 @@ async def chat_completions_stream(request: ChatCompletionRequest):
         for turn_id, turn in request_rag.memory().items():
             if not isinstance(turn_id, int) and hasattr(turn, 'user_query') and hasattr(turn, 'assistant_response'):
                 conversation_history += f"<turn>\n<user>{turn.user_query.query_str}</user>\n<assistant>{turn.assistant_response.response_str}</assistant>\n</turn>\n"
+
+        # Fit oversized inputs (full program sources) to the provider's context budget
+        file_content, context_text = fit_to_budget(
+            file_content=file_content,
+            context_text=context_text,
+            base_tokens=count_tokens(
+                system_prompt + conversation_history + query,
+                is_ollama_embedder=(request.provider == "ollama"),
+            ),
+            budget=prompt_token_budget(request.provider),
+        )
 
         # Create the prompt with context
         prompt = f"/no_think {system_prompt}\n\n"
