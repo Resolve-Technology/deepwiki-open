@@ -416,7 +416,8 @@ export default function RepoWikiPage() {
         const repoUrl = getRepoUrl(effectiveRepoInfo);
 
         // Create the prompt content - simplified to avoid message dialogs
- const promptContent =
+        const isDeepDive = page.id.startsWith('page-analysis-');
+ const standardPrompt =
 `You are an expert technical writer and software architect.
 Your task is to generate a comprehensive and accurate technical wiki page in Markdown format about a specific feature, system, or module within a given software project.
 Write in a formal, precise, structured technical-documentation style appropriate to the page's role within its document (a developer Wiki, a Technical Specification Document, or a Business and Functional Requirement document). Where the page documents data structures (copybooks/record layouts, physical/logical files), present them as field tables (field name, type/PIC, length, description); where it documents a program, summarize its business function, inputs/outputs, called modules, and key logic; where it documents a business or functional requirement, state it as numbered BR#/FR# items.
@@ -528,6 +529,114 @@ Remember:
 - Structure the document logically for easy understanding by other developers.
 `;
 
+        const deepDivePrompt =
+`You are a senior mainframe/COBOL systems analyst producing the definitive reference analysis of one program.
+You are given the COMPLETE source of the program in [CURRENT_FILE_CONTENT]. Base EVERY statement strictly on that source (plus any copybook files provided). Never invent fields, paragraphs, or behavior. Cite line numbers for every claim using the format [${page.filePaths[0] ?? 'source'}:start-end]().
+
+CRITICAL STARTING INSTRUCTION:
+The very first thing on the page MUST be a \`<details>\` block listing the source file(s) analyzed:
+<details>
+<summary>Relevant source files</summary>
+
+${filePaths.map(path => `- [${path}](${generateFileUrl(path)})`).join('\n')}
+</details>
+
+Immediately after, the H1 title: \`# ${page.title}\`
+
+Then produce ALL of the following numbered sections (every one is REQUIRED; if a section is genuinely not applicable to this program, keep the heading and state in one line why it does not apply):
+
+## 1. Program Identification
+Table: program name, platform (infer from source style, e.g. IBM AS/400), version/date stamps found in source, change/work-unit references found in comments, one-paragraph business purpose.
+
+## 2. Environment & File Definitions
+For EVERY file in SELECT/ASSIGN and FD entries: logical name, physical file/member, record format name, organization, access mode, key fields, open mode used (INPUT/OUTPUT/I-O/EXTEND), and its role (primary input / primary output / update-in-place / control / reference lookup). Group into Input / Output-Update / Reference tables.
+
+## 3. Copybooks & Record Layouts
+Every COPY member and inline record layout: where used, full field table (level, field name, PIC, computed byte length, description inferred from usage). Do not skip filler fields.
+
+## 4. Working-Storage Inventory (EXHAUSTIVE)
+EVERY 01/77-level item and its subordinate fields — no exceptions, including counters, flags, constants, timestamps and work areas. Table columns: field, PIC, length, initial value, purpose, and the paragraphs that read or write it. Group logically (constants / flags / counters / timestamps / record areas / work fields).
+
+## 5. Procedure Division — Complete Paragraph Inventory
+First a table of EVERY paragraph/SECTION in source order: name, one-line purpose, performed-by (callers), performs (callees), files touched.
+Then a Mermaid call-graph (graph TD) of the PERFORM structure covering EVERY paragraph.
+
+## 6. Paragraph-by-Paragraph Analysis (THE CORE — be exhaustive)
+One ### subsection PER PARAGRAPH, in source order. Do NOT group or summarize multiple paragraphs together. For each: purpose; trigger/caller; numbered step-by-step logic; every file operation (verb, file, key used, status handling); every condition/branch and what each path does; data transformations (source field → target field); a Mermaid flowchart (graph TD) for any paragraph with branching or loops.
+
+## 7. Control & Restart Mechanisms
+Any checkpoint/timestamp/incremental-processing/commit logic: which fields and files implement it, the exact sequence (Mermaid sequenceDiagram), what happens on abnormal termination, rerun/restart safety analysis.
+
+## 8. End-to-End Data Flow
+Mermaid flowchart (graph TD): every input file → the transformations/decision points → every output/updated file. Follow with a field-level mapping table (output field ← source field/derivation) for the primary output record.
+
+## 9. Error Handling Inventory
+EVERY file-status check, INVALID KEY clause, error flag set/test, error display/abend path: table of location (paragraph + lines), condition detected, and the program's response.
+
+## 10. External Dependencies & Cross-Program Relationships
+Called programs (CALL statements), callers if inferable from comments, shared files that couple this program to others, JCL/scheduling hints found in comments.
+
+## 11. Operational Notes & Gotchas
+Concrete, evidence-based warnings: rerun/duplicate-processing risks, sort-order assumptions, REWRITE-after-READ requirements, counter overflow limits (compute the actual limit from the PIC), locking/contention, hard-coded values that look like configuration.
+
+## 12. Glossary
+Business and technical terms appearing in the source (field prefixes, file names, domain abbreviations) with their meanings as evidenced by usage.
+
+COMPLETENESS RULES (these override brevity):
+- Section 6 MUST contain one subsection for EVERY paragraph listed in section 5 — a reviewer will diff the two lists.
+- Section 4 MUST contain EVERY working-storage item — a reviewer will grep the source for 01/77 levels and check.
+- Prefer tables over prose. Cite line numbers everywhere. This document must exceed the detail of a human-written 8-page program analysis; length is NOT a concern, completeness is.
+
+CRITICAL: All diagrams MUST follow strict vertical orientation:
+       - Use "graph TD" (top-down) directive for flow diagrams
+       - NEVER use "graph LR" (left-right)
+       - Maximum node width should be 3-4 words
+       - For sequence diagrams:
+         - Start with "sequenceDiagram" directive on its own line
+         - Define ALL participants at the beginning using "participant" keyword
+         - Optionally specify participant types: actor, boundary, control, entity, database, collections, queue
+         - Use descriptive but concise participant names, or use aliases: "participant A as Alice"
+         - Use the correct Mermaid arrow syntax (8 types available):
+           - -> solid line without arrow (rarely used)
+           - --> dotted line without arrow (rarely used)
+           - ->> solid line with arrowhead (most common for requests/calls)
+           - -->> dotted line with arrowhead (most common for responses/returns)
+           - ->x solid line with X at end (failed/error message)
+           - -->x dotted line with X at end (failed/error response)
+           - -) solid line with open arrow (async message, fire-and-forget)
+           - --) dotted line with open arrow (async response)
+           - Examples: A->>B: Request, B-->>A: Response, A->xB: Error, A-)B: Async event
+         - Use +/- suffix for activation boxes: A->>+B: Start (activates B), B-->>-A: End (deactivates B)
+         - Group related participants using "box": box GroupName ... end
+         - Use structural elements for complex flows:
+           - loop LoopText ... end (for iterations)
+           - alt ConditionText ... else ... end (for conditionals)
+           - opt OptionalText ... end (for optional flows)
+           - par ParallelText ... and ... end (for parallel actions)
+           - critical CriticalText ... option ... end (for critical regions)
+           - break BreakText ... end (for breaking flows/exceptions)
+         - Add notes for clarification: "Note over A,B: Description", "Note right of A: Detail"
+         - Use autonumber directive to add sequence numbers to messages
+         - NEVER use flowchart-style labels like A--|label|-->B. Always use a colon for labels: A->>B: My Label
+
+IMPORTANT: Generate the content in ${language === 'en' ? 'English' :
+            language === 'ja' ? 'Japanese (日本語)' :
+            language === 'zh' ? 'Mandarin Chinese (中文)' :
+            language === 'zh-tw' ? 'Traditional Chinese (繁體中文)' :
+            language === 'es' ? 'Spanish (Español)' :
+            language === 'kr' ? 'Korean (한국어)' :
+            language === 'vi' ? 'Vietnamese (Tiếng Việt)' :
+            language === "pt-br" ? "Brazilian Portuguese (Português Brasileiro)" :
+            language === "fr" ? "Français (French)" :
+            language === "ru" ? "Русский (Russian)" :
+            'English'} language.
+
+[WIKI_PAGE_TOPIC]: ${page.title}
+[CURRENT_FILE_CONTENT]: provided in the request context.
+`;
+
+        const promptContent = isDeepDive ? deepDivePrompt : standardPrompt;
+
         // Prepare request body
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const requestBody: Record<string, any> = {
@@ -541,6 +650,15 @@ Remember:
 
         // Add tokens if available
         addTokensToRequestBody(requestBody, currentToken, effectiveRepoInfo.type, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, language, modelExcludedDirs, modelExcludedFiles, modelIncludedDirs, modelIncludedFiles);
+
+        // Deep-dive pages get the full program source injected server-side
+        if (isDeepDive) {
+          if (page.filePaths.length > 0) {
+            requestBody.filePath = page.filePaths[0];
+          } else {
+            console.warn(`Deep-dive page ${page.id} has no filePaths — full-source injection skipped; page will be shallow`);
+          }
+        }
 
         // Use WebSocket for communication
         let content = '';
