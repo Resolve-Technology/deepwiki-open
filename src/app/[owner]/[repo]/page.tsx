@@ -247,6 +247,7 @@ export default function RepoWikiPage() {
   const [customSelectedModelState, setCustomSelectedModelState] = useState(customModelParam);
   const [showModelOptions, setShowModelOptions] = useState(false); // Controls whether to show model options
   const [refreshNonce, setRefreshNonce] = useState(0);
+  const [wikiMeta, setWikiMeta] = useState<{ generatedAt?: string; repoCommit?: string }>({});
   const excludedDirs = searchParams.get('excluded_dirs') || '';
   const excludedFiles = searchParams.get('excluded_files') || '';
   const [modelExcludedDirs, setModelExcludedDirs] = useState(excludedDirs);
@@ -1717,7 +1718,11 @@ IMPORTANT:
           repo_url: repoUrl,
           type: effectiveRepoInfo.type,
           pages: pagesToExport,
-          format
+          format,
+          provider: selectedProviderState,
+          model: selectedModelState,
+          generated_at: wikiMeta.generatedAt,
+          repo_commit: wikiMeta.repoCommit
         })
       });
 
@@ -1756,7 +1761,7 @@ IMPORTANT:
       setIsExporting(false);
       setLoadingMessage(undefined);
     }
-  }, [wikiStructure, generatedPages, effectiveRepoInfo, language]);
+  }, [wikiStructure, generatedPages, effectiveRepoInfo, language, selectedProviderState, selectedModelState, wikiMeta]);
 
   // No longer needed as we use the modal directly
 
@@ -1915,6 +1920,7 @@ IMPORTANT:
               if(cachedData.provider) {
                 setSelectedProviderState(cachedData.provider);
               }
+              setWikiMeta({ generatedAt: cachedData.generated_at, repoCommit: cachedData.repo_commit });
 
               // Update repoInfo
               if(cachedData.repo) {
@@ -2118,6 +2124,10 @@ IMPORTANT:
 
             if (response.ok) {
               console.log('Wiki data successfully saved to server cache');
+              const result = await response.json().catch(() => null);
+              if (result) {
+                setWikiMeta({ generatedAt: result.generated_at, repoCommit: result.repo_commit });
+              }
             } else {
               console.error('Error saving wiki data to server cache:', response.status, await response.text());
             }
@@ -2129,7 +2139,7 @@ IMPORTANT:
     };
 
     saveCache();
-  }, [isLoading, error, wikiStructure, generatedPages, effectiveRepoInfo.owner, effectiveRepoInfo.repo, effectiveRepoInfo.type, effectiveRepoInfo.repoUrl, repoUrl, language, isComprehensiveView]);
+  }, [isLoading, error, wikiStructure, generatedPages, effectiveRepoInfo.owner, effectiveRepoInfo.repo, effectiveRepoInfo.type, effectiveRepoInfo.repoUrl, repoUrl, language, isComprehensiveView, selectedProviderState, selectedModelState]);
 
   const handlePageSelect = (pageId: string) => {
     if (currentPageId != pageId) {

@@ -235,3 +235,50 @@ def test_delete_missing_version_raises_404(cache_dir):
             owner="owner", repo="repo", repo_type="github", language="en",
             provider="openai", model="gpt-4o", authorization_code=None))
     assert exc.value.status_code == 404
+
+
+# --- generation metadata & export format ---
+
+def test_save_sets_generated_at(cache_dir):
+    asyncio.run(save_wiki_cache(make_cache_request("claude", "claude-sonnet-4-6")))
+    data = asyncio.run(read_wiki_cache("owner", "repo", "github", "en",
+                                       provider="claude", model="claude-sonnet-4-6"))
+    assert data.generated_at  # ISO timestamp set server-side on save
+    assert "T" in data.generated_at
+
+def test_get_repo_commit_missing_repo_returns_none():
+    commit = api_module.get_repo_commit(
+        RepoInfo(owner="definitely-not", repo="cloned", type="github"))
+    assert commit is None
+
+def test_get_repo_commit_reads_head_of_local_repo(tmp_path):
+    import subprocess
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "f.txt").write_text("x")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "-c", "user.email=t@t.t", "-c", "user.name=t",
+                    "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
+    commit = api_module.get_repo_commit(
+        RepoInfo(owner="o", repo="r", type="local", localPath=str(tmp_path)))
+    assert commit is not None and len(commit) == 40
+
+def test_markdown_export_includes_generation_metadata():
+    req = make_cache_request("claude", "claude-sonnet-4-6")
+    md = api_module.generate_markdown_export(
+        "https://github.com/owner/repo", list(req.generated_pages.values()),
+        provider="claude", model="claude-sonnet-4-6",
+        generated_at="2026-06-05T00:00:00+00:00", repo_commit="abc1234")
+    assert "claude/claude-sonnet-4-6" in md
+    assert "abc1234" in md
+    assert "2026-06-05T00:00:00+00:00" in md
+
+def test_json_export_includes_generation_metadata():
+    req = make_cache_request("claude", "claude-sonnet-4-6")
+    out = json.loads(api_module.generate_json_export(
+        "https://github.com/owner/repo", list(req.generated_pages.values()),
+        provider="claude", model="claude-sonnet-4-6",
+        generated_at="2026-06-05T00:00:00+00:00", repo_commit="abc1234"))
+    assert out["metadata"]["provider"] == "claude"
+    assert out["metadata"]["model"] == "claude-sonnet-4-6"
+    assert out["metadata"]["repo_commit"] == "abc1234"
+    assert out["metadata"]["generated_at"] == "2026-06-05T00:00:00+00:00"
