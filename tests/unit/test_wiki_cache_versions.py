@@ -329,3 +329,21 @@ def test_review_files_invisible_to_wiki_cache(cache_dir):
     # Review files are not parsed as wiki caches and not picked up by newest-wins
     assert parse_wiki_cache_filename(review_files[0]) is None
     assert list_wiki_cache_paths("owner", "repo", "github", "en") == []
+
+
+def test_review_save_strips_repo_token(cache_dir):
+    review = make_review()
+    review.repo.token = "ghp_secret"
+    asyncio.run(api_module.store_wiki_review(review))
+    reviews = asyncio.run(api_module.get_wiki_reviews(
+        owner="owner", repo="repo", repo_type="github", language="en"))
+    assert reviews[0].repo.token is None
+
+
+def test_cache_save_strips_repo_token(cache_dir):
+    req = make_cache_request("claude", "claude-sonnet-4-6")
+    req.repo.token = "ghp_secret"
+    asyncio.run(save_wiki_cache(req))
+    data = asyncio.run(read_wiki_cache("owner", "repo", "github", "en",
+                                       provider="claude", model="claude-sonnet-4-6"))
+    assert data.repo.token is None

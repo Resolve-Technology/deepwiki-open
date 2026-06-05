@@ -80,7 +80,7 @@ export const createChatWebSocket = (
  * @param ws The WebSocket connection to close
  */
 export const closeWebSocket = (ws: WebSocket | null): void => {
-  if (ws && ws.readyState === WebSocket.OPEN) {
+  if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
     ws.close();
   }
 };

@@ -625,6 +625,9 @@ async def save_wiki_cache(data: WikiCacheRequest) -> bool:
                                      data.language, data.provider, data.model)
     logger.info(f"Attempting to save wiki cache. Path: {cache_path}")
     try:
+        # Never persist access tokens to disk (the cache JSON is re-served via GET).
+        if data.repo and data.repo.token:
+            data.repo.token = None
         payload = WikiCacheData(
             wiki_structure=data.wiki_structure,
             generated_pages=data.generated_pages,
@@ -762,6 +765,8 @@ async def delete_wiki_cache(
 async def store_wiki_review(review: WikiReviewData):
     """Saves a cross-model review next to the wiki caches (same key overwrites)."""
     review.created_at = datetime.now(timezone.utc).isoformat()
+    # Never persist access tokens to disk (the review JSON is re-served via GET).
+    review.repo.token = None
     review_path = get_wiki_review_path(
         review.repo.owner, review.repo.repo, review.repo.type, review.language,
         review.reviewed_provider, review.reviewed_model,

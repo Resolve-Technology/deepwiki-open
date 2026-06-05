@@ -73,6 +73,15 @@ export default function WikiReviewModal({
   // Close any in-flight websocket on unmount
   useEffect(() => () => closeWebSocket(webSocketRef.current), []);
 
+  // Stop any in-flight review when the modal is closed (component stays mounted).
+  useEffect(() => {
+    if (!isOpen && webSocketRef.current) {
+      closeWebSocket(webSocketRef.current);
+      webSocketRef.current = null;
+      setIsReviewing(false);
+    }
+  }, [isOpen]);
+
   // Short retrieval query so the backend can fetch code context via RAG even
   // though the full review prompt exceeds the websocket's large-input gate.
   const buildRagQuery = useCallback(() => {
@@ -115,7 +124,8 @@ ${wikiText}
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          repo: repoInfo,
+          // Never persist access tokens — strip before sending to the backend.
+          repo: { ...repoInfo, token: null },
           language: language,
           reviewed_provider: reviewedProvider,
           reviewed_model: reviewedModel,
@@ -152,6 +162,7 @@ ${wikiText}
       setReviewError('Select a reviewer provider and model first.');
       return;
     }
+    closeWebSocket(webSocketRef.current);
     setReviewError(null);
     setReviewContent('');
     setIsReviewing(true);
@@ -180,8 +191,12 @@ ${wikiText}
       },
       () => {
         setIsReviewing(false);
-        if (content.trim()) {
+        const finished = content.trim();
+        if (finished && !finished.startsWith('Error:')) {
           saveReview(content, reviewerProvider, effectiveModel);
+        } else if (finished) {
+          // Backend reported a failure as message text — surface it, don't save it.
+          setReviewError(finished.slice(0, 300));
         }
       },
     );
