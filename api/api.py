@@ -65,6 +65,8 @@ class ProcessedProjectEntry(BaseModel):
     repo_type: str # Renamed from type to repo_type for clarity with existing models
     submittedAt: int # Timestamp
     language: str # Extracted from filename
+    provider: Optional[str] = None  # Extracted from versioned filenames
+    model: Optional[str] = None     # Extracted from versioned filenames
 
 class RepoInfo(BaseModel):
     owner: str
@@ -577,23 +579,25 @@ async def get_cached_wiki(
     owner: str = Query(..., description="Repository owner"),
     repo: str = Query(..., description="Repository name"),
     repo_type: str = Query(..., description="Repository type (e.g., github, gitlab)"),
-    language: str = Query(..., description="Language of the wiki content")
+    language: str = Query(..., description="Language of the wiki content"),
+    provider: Optional[str] = Query(None, description="LLM provider of the cached version; omit for newest"),
+    model: Optional[str] = Query(None, description="Model of the cached version; omit for newest")
 ):
     """
     Retrieves cached wiki data (structure and generated pages) for a repository.
+    With provider+model, returns that exact version; otherwise the newest one.
     """
     # Language validation
     supported_langs = configs["lang_config"]["supported_languages"]
     if not supported_langs.__contains__(language):
         language = configs["lang_config"]["default"]
 
-    logger.info(f"Attempting to retrieve wiki cache for {owner}/{repo} ({repo_type}), lang: {language}")
-    cached_data = await read_wiki_cache(owner, repo, repo_type, language)
+    logger.info(f"Attempting to retrieve wiki cache for {owner}/{repo} ({repo_type}), lang: {language}, provider: {provider}, model: {model}")
+    cached_data = await read_wiki_cache(owner, repo, repo_type, language, provider, model)
     if cached_data:
         return cached_data
     else:
         # Return 200 with null body if not found, as frontend expects this behavior
-        # Or, raise HTTPException(status_code=404, detail="Wiki cache not found") if preferred
         logger.info(f"Wiki cache not found for {owner}/{repo} ({repo_type}), lang: {language}")
         return None
 
@@ -621,10 +625,13 @@ async def delete_wiki_cache(
     repo: str = Query(..., description="Repository name"),
     repo_type: str = Query(..., description="Repository type (e.g., github, gitlab)"),
     language: str = Query(..., description="Language of the wiki content"),
+    provider: Optional[str] = Query(None, description="LLM provider of the version to delete; omit to delete all versions"),
+    model: Optional[str] = Query(None, description="Model of the version to delete; omit to delete all versions"),
     authorization_code: Optional[str] = Query(None, description="Authorization code")
 ):
     """
-    Deletes a specific wiki cache from the file system.
+    Deletes wiki cache from the file system. With provider+model, deletes that
+    version only; otherwise deletes every cached version for the repo.
     """
     # Language validation
     supported_langs = configs["lang_config"]["supported_languages"]
@@ -636,20 +643,30 @@ async def delete_wiki_cache(
         if not authorization_code or WIKI_AUTH_CODE != authorization_code:
             raise HTTPException(status_code=401, detail="Authorization code is invalid")
 
-    logger.info(f"Attempting to delete wiki cache for {owner}/{repo} ({repo_type}), lang: {language}")
-    cache_path = get_wiki_cache_path(owner, repo, repo_type, language)
-
-    if os.path.exists(cache_path):
-        try:
-            os.remove(cache_path)
-            logger.info(f"Successfully deleted wiki cache: {cache_path}")
-            return {"message": f"Wiki cache for {owner}/{repo} ({language}) deleted successfully"}
-        except Exception as e:
-            logger.error(f"Error deleting wiki cache {cache_path}: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail="Failed to delete wiki cache.")
+    logger.info(f"Attempting to delete wiki cache for {owner}/{repo} ({repo_type}), lang: {language}, provider: {provider}, model: {model}")
+    if sanitize_version_segment(provider) and sanitize_version_segment(model):
+        paths = [get_wiki_cache_path(owner, repo, repo_type, language, provider, model)]
     else:
-        logger.warning(f"Wiki cache not found, cannot delete: {cache_path}")
+        paths = list_wiki_cache_paths(owner, repo, repo_type, language)
+
+    deleted = []
+    for cache_path in paths:
+        if os.path.exists(cache_path):
+            try:
+                os.remove(cache_path)
+                deleted.append(os.path.basename(cache_path))
+                logger.info(f"Successfully deleted wiki cache: {cache_path}")
+            except Exception as e:
+                logger.error(f"Error deleting wiki cache {cache_path}: {e}", exc_info=True)
+                raise HTTPException(status_code=500, detail="Failed to delete wiki cache.")
+
+    if not deleted:
+        logger.warning(f"Wiki cache not found, cannot delete: {owner}/{repo} ({language}), provider: {provider}, model: {model}")
         raise HTTPException(status_code=404, detail="Wiki cache not found")
+    return {
+        "message": f"Deleted {len(deleted)} wiki cache file(s) for {owner}/{repo} ({language})",
+        "deleted": deleted,
+    }
 
 @app.get("/health")
 async def health_check():
@@ -709,31 +726,24 @@ async def get_processed_projects():
             if filename.startswith("deepwiki_cache_") and filename.endswith(".json"):
                 file_path = os.path.join(WIKI_CACHE_DIR, filename)
                 try:
-                    stats = await asyncio.to_thread(os.stat, file_path) # Use asyncio.to_thread for os.stat
-                    parts = filename.replace("deepwiki_cache_", "").replace(".json", "").split('_')
-
-                    # Expecting repo_type_owner_repo_language
-                    # Example: deepwiki_cache_github_AsyncFuncAI_deepwiki-open_en.json
-                    # parts = [github, AsyncFuncAI, deepwiki-open, en]
-                    if len(parts) >= 4:
-                        repo_type = parts[0]
-                        owner = parts[1]
-                        language = parts[-1] # language is the last part
-                        repo = "_".join(parts[2:-1]) # repo can contain underscores
-
-                        project_entries.append(
-                            ProcessedProjectEntry(
-                                id=filename,
-                                owner=owner,
-                                repo=repo,
-                                name=f"{owner}/{repo}",
-                                repo_type=repo_type,
-                                submittedAt=int(stats.st_mtime * 1000), # Convert to milliseconds
-                                language=language
-                            )
-                        )
-                    else:
+                    parsed = parse_wiki_cache_filename(filename)
+                    if not parsed:
                         logger.warning(f"Could not parse project details from filename: {filename}")
+                        continue
+                    stats = await asyncio.to_thread(os.stat, file_path) # Use asyncio.to_thread for os.stat
+                    project_entries.append(
+                        ProcessedProjectEntry(
+                            id=filename,
+                            owner=parsed["owner"],
+                            repo=parsed["repo"],
+                            name=f"{parsed['owner']}/{parsed['repo']}",
+                            repo_type=parsed["repo_type"],
+                            submittedAt=int(stats.st_mtime * 1000), # Convert to milliseconds
+                            language=parsed["language"],
+                            provider=parsed["provider"],
+                            model=parsed["model"],
+                        )
+                    )
                 except Exception as e:
                     logger.error(f"Error processing file {file_path}: {e}")
                     continue # Skip this file on error
