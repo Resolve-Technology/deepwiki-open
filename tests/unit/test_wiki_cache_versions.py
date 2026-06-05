@@ -282,3 +282,50 @@ def test_json_export_includes_generation_metadata():
     assert out["metadata"]["model"] == "claude-sonnet-4-6"
     assert out["metadata"]["repo_commit"] == "abc1234"
     assert out["metadata"]["generated_at"] == "2026-06-05T00:00:00+00:00"
+
+
+# --- cross-model wiki reviews ---
+
+def make_review(reviewer_provider="openai", reviewer_model="gpt-4o", content="Looks accurate."):
+    return api_module.WikiReviewData(
+        repo=RepoInfo(owner="owner", repo="repo", type="github"),
+        language="en",
+        reviewed_provider="claude",
+        reviewed_model="claude-sonnet-4-6",
+        reviewer_provider=reviewer_provider,
+        reviewer_model=reviewer_model,
+        content=content,
+    )
+
+def test_review_save_and_list_roundtrip(cache_dir):
+    asyncio.run(api_module.store_wiki_review(make_review()))
+    reviews = asyncio.run(api_module.get_wiki_reviews(
+        owner="owner", repo="repo", repo_type="github", language="en"))
+    assert len(reviews) == 1
+    assert reviews[0].reviewer_provider == "openai"
+    assert reviews[0].reviewed_model == "claude-sonnet-4-6"
+    assert reviews[0].created_at  # set server-side
+
+def test_review_same_key_overwrites(cache_dir):
+    asyncio.run(api_module.store_wiki_review(make_review(content="v1")))
+    asyncio.run(api_module.store_wiki_review(make_review(content="v2")))
+    reviews = asyncio.run(api_module.get_wiki_reviews(
+        owner="owner", repo="repo", repo_type="github", language="en"))
+    assert len(reviews) == 1
+    assert reviews[0].content == "v2"
+
+def test_review_different_reviewers_coexist(cache_dir):
+    asyncio.run(api_module.store_wiki_review(make_review("openai", "gpt-4o")))
+    asyncio.run(api_module.store_wiki_review(make_review("vllm", "Qwen/Qwen3-32B")))
+    reviews = asyncio.run(api_module.get_wiki_reviews(
+        owner="owner", repo="repo", repo_type="github", language="en"))
+    assert len(reviews) == 2
+
+def test_review_files_invisible_to_wiki_cache(cache_dir):
+    asyncio.run(api_module.store_wiki_review(make_review()))
+    review_files = os.listdir(cache_dir)
+    assert len(review_files) == 1
+    assert review_files[0].startswith("deepwiki_review_")
+    # Review files are not parsed as wiki caches and not picked up by newest-wins
+    assert parse_wiki_cache_filename(review_files[0]) is None
+    assert list_wiki_cache_paths("owner", "repo", "github", "en") == []

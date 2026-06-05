@@ -58,6 +58,7 @@ class ChatCompletionRequest(BaseModel):
         description="Model provider (google, openai, openrouter, ollama, bedrock, azure, dashscope)",
     )
     model: Optional[str] = Field(None, description="Model name for the specified provider")
+    rag_query: Optional[str] = Field(None, description="Optional short query used for RAG retrieval instead of the last message; lets oversized prompts still receive repository context")
 
     language: Optional[str] = Field("en", description="Language for content generation (e.g., 'en', 'ja', 'zh', 'es', 'kr', 'vi')")
     excluded_dirs: Optional[str] = Field(None, description="Comma-separated list of directories to exclude from processing")
@@ -198,14 +199,18 @@ async def handle_websocket_chat(websocket: WebSocket):
         context_text = ""
         retrieved_documents = None
 
-        if not input_too_large:
+        if not input_too_large or request.rag_query:
             try:
-                # If filePath exists, modify the query for RAG to focus on the file
-                rag_query = query
-                if request.filePath:
-                    # Use the file path to get relevant context about the file
+                # Choose the retrieval query: an explicit short rag_query wins,
+                # then a filePath-focused query, then the message itself.
+                if request.rag_query:
+                    rag_query = request.rag_query
+                    logger.info("Using explicit rag_query for retrieval")
+                elif request.filePath:
                     rag_query = f"Contexts related to {request.filePath}"
                     logger.info(f"Modified RAG query to focus on file: {request.filePath}")
+                else:
+                    rag_query = query
 
                 # Try to perform RAG retrieval
                 try:

@@ -123,6 +123,17 @@ class WikiCacheRequest(BaseModel):
     provider: str
     model: str
 
+class WikiReviewData(BaseModel):
+    """A cross-model review of one saved wiki version."""
+    repo: RepoInfo
+    language: str
+    reviewed_provider: str   # provider/model that generated the wiki under review
+    reviewed_model: str
+    reviewer_provider: str   # provider/model that performed the review
+    reviewer_model: str
+    content: str             # review markdown produced by the reviewer model
+    created_at: Optional[str] = None  # ISO-8601 UTC, set server-side on save
+
 class WikiExportRequest(BaseModel):
     """
     Model for requesting a wiki export.
@@ -539,6 +550,25 @@ def list_wiki_cache_paths(owner: str, repo: str, repo_type: str, language: str) 
     paths.sort(key=_mtime, reverse=True)
     return paths
 
+def get_wiki_review_path(owner: str, repo: str, repo_type: str, language: str,
+                         reviewed_provider: str, reviewed_model: str,
+                         reviewer_provider: str, reviewer_model: str) -> str:
+    """Path for a cross-model review file; same guards as wiki cache paths."""
+    for seg in (owner, repo, repo_type, language):
+        if not seg or seg in ('.', '..') or not _SAFE_CACHE_SEGMENT.match(seg):
+            raise HTTPException(status_code=400, detail="Invalid repository identifier.")
+    version_segs = [sanitize_version_segment(s) for s in
+                    (reviewed_provider, reviewed_model, reviewer_provider, reviewer_model)]
+    if not all(version_segs):
+        raise HTTPException(status_code=400, detail="Invalid provider/model identifier.")
+    filename = (f"deepwiki_review_{repo_type}_{owner}_{repo}_{language}~"
+                + "~".join(version_segs) + ".json")
+    path = os.path.join(WIKI_CACHE_DIR, filename)
+    # Containment backstop: the resolved path must stay inside the cache directory.
+    if not os.path.realpath(path).startswith(os.path.realpath(WIKI_CACHE_DIR) + os.sep):
+        raise HTTPException(status_code=400, detail="Invalid cache path.")
+    return path
+
 def parse_wiki_cache_filename(filename: str) -> Optional[Dict[str, Optional[str]]]:
     """Parses a wiki cache filename into its components.
 
@@ -727,6 +757,47 @@ async def delete_wiki_cache(
         "message": f"Deleted {len(deleted)} wiki cache file(s) for {owner}/{repo} ({language})",
         "deleted": deleted,
     }
+
+@app.post("/api/wiki_review")
+async def store_wiki_review(review: WikiReviewData):
+    """Saves a cross-model review next to the wiki caches (same key overwrites)."""
+    review.created_at = datetime.now(timezone.utc).isoformat()
+    review_path = get_wiki_review_path(
+        review.repo.owner, review.repo.repo, review.repo.type, review.language,
+        review.reviewed_provider, review.reviewed_model,
+        review.reviewer_provider, review.reviewer_model)
+    try:
+        with open(review_path, 'w', encoding='utf-8') as f:
+            json.dump(review.model_dump(), f, indent=2)
+        logger.info(f"Wiki review saved to {review_path}")
+        return {"message": "Wiki review saved successfully", "created_at": review.created_at}
+    except Exception as e:
+        logger.error(f"Error saving wiki review to {review_path}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to save wiki review")
+
+@app.get("/api/wiki_review", response_model=List[WikiReviewData])
+async def get_wiki_reviews(
+    owner: str = Query(..., description="Repository owner"),
+    repo: str = Query(..., description="Repository name"),
+    repo_type: str = Query(..., description="Repository type (e.g., github, gitlab)"),
+    language: str = Query(..., description="Language of the wiki content")
+):
+    """Lists all saved cross-model reviews for a repository, newest first."""
+    for seg in (owner, repo, repo_type, language):
+        if not seg or seg in ('.', '..') or not _SAFE_CACHE_SEGMENT.match(seg):
+            raise HTTPException(status_code=400, detail="Invalid repository identifier.")
+    pattern = os.path.join(WIKI_CACHE_DIR,
+                           f"deepwiki_review_{repo_type}_{owner}_{repo}_{language}~*.json")
+    reviews = []
+    for review_path in glob.glob(pattern):
+        try:
+            with open(review_path, 'r', encoding='utf-8') as f:
+                reviews.append(WikiReviewData(**json.load(f)))
+        except Exception as e:
+            logger.error(f"Error reading wiki review from {review_path}: {e}")
+            continue
+    reviews.sort(key=lambda r: r.created_at or "", reverse=True)
+    return reviews
 
 @app.get("/health")
 async def health_check():
