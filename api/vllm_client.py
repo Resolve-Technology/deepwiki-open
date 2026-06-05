@@ -34,6 +34,9 @@ class VLLMClient(OpenAIClient):
         BAAI/bge-m3
     """
 
+    # Prefix used by _log_usage lines; subclasses override (e.g. "Claude usage").
+    usage_log_prefix = "vLLM usage"
+
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -68,11 +71,11 @@ class VLLMClient(OpenAIClient):
         return api_kwargs
 
     def _log_usage(self, usage: Any, model: Optional[str]) -> None:
-        """Log token usage reported by the vLLM server."""
+        """Log token usage reported by the server."""
         if usage is None:
             return
         log.info(
-            f"vLLM usage: model={model} prompt_tokens={getattr(usage, 'prompt_tokens', None)} "
+            f"{self.usage_log_prefix}: model={model} prompt_tokens={getattr(usage, 'prompt_tokens', None)} "
             f"completion_tokens={getattr(usage, 'completion_tokens', None)} "
             f"total_tokens={getattr(usage, 'total_tokens', None)}"
         )
