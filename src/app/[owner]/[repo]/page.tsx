@@ -417,7 +417,7 @@ export default function RepoWikiPage() {
 
         // Create the prompt content - simplified to avoid message dialogs
         const isDeepDive = page.id.startsWith('page-analysis-');
- const standardPrompt =
+        const standardPrompt =
 `You are an expert technical writer and software architect.
 Your task is to generate a comprehensive and accurate technical wiki page in Markdown format about a specific feature, system, or module within a given software project.
 Write in a formal, precise, structured technical-documentation style appropriate to the page's role within its document (a developer Wiki, a Technical Specification Document, or a Business and Functional Requirement document). Where the page documents data structures (copybooks/record layouts, physical/logical files), present them as field tables (field name, type/PIC, length, description); where it documents a program, summarize its business function, inputs/outputs, called modules, and key logic; where it documents a business or functional requirement, state it as numbered BR#/FR# items.
