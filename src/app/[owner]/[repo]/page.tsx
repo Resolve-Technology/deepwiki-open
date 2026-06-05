@@ -986,8 +986,15 @@ IMPORTANT:
       // Add tokens if available
       addTokensToRequestBody(requestBody, currentToken, effectiveRepoInfo.type, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, language, modelExcludedDirs, modelExcludedFiles, modelIncludedDirs, modelIncludedFiles);
 
-      // Use WebSocket for communication
+      // Use WebSocket for communication.
+      // The whole request/extract sequence retries because the structure
+      // response occasionally arrives truncated or without parseable XML.
       let responseText = '';
+      let xmlMatch: RegExpMatchArray | null = null;
+      const MAX_STRUCTURE_ATTEMPTS = 3;
+
+      for (let attempt = 1; attempt <= MAX_STRUCTURE_ATTEMPTS && !xmlMatch; attempt++) {
+      responseText = '';
 
       try {
         // Create WebSocket URL from the server base URL
@@ -1093,7 +1100,20 @@ IMPORTANT:
       responseText = responseText.replace(/^```(?:xml)?\s*/i, '').replace(/```\s*$/i, '');
 
       // Extract wiki structure from response
-      const xmlMatch = responseText.match(/<wiki_structure>[\s\S]*?<\/wiki_structure>/m);
+      xmlMatch = responseText.match(/<wiki_structure>[\s\S]*?<\/wiki_structure>/m);
+      if (!xmlMatch) {
+        console.error(
+          `Wiki structure attempt ${attempt}/${MAX_STRUCTURE_ATTEMPTS}: no valid XML in response ` +
+          `(received ${responseText.length} chars; ` +
+          `has opening tag: ${responseText.includes('<wiki_structure>')}; ` +
+          `tail: ${JSON.stringify(responseText.slice(-150))})`
+        );
+        if (attempt < MAX_STRUCTURE_ATTEMPTS) {
+          setLoadingMessage(`Structure response was invalid — retrying (attempt ${attempt + 1}/${MAX_STRUCTURE_ATTEMPTS})...`);
+        }
+      }
+      } // end structure attempts loop
+
       if (!xmlMatch) {
         throw new Error('No valid XML found in response');
       }
