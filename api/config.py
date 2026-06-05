@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 from api.openai_client import OpenAIClient
 from api.litellm_client import LiteLLMClient
 from api.vllm_client import VLLMClient
+from api.claude_client import ClaudeClient
 from api.openrouter_client import OpenRouterClient
 from api.bedrock_client import BedrockClient
 from api.google_embedder_client import GoogleEmbedderClient
@@ -66,6 +67,7 @@ CLIENT_CLASSES = {
     "OpenAIClient": OpenAIClient,
     "LiteLLMClient" : LiteLLMClient,
     "VLLMClient": VLLMClient,
+    "ClaudeClient": ClaudeClient,
     "OpenRouterClient": OpenRouterClient,
     "OllamaClient": OllamaClient,
     "BedrockClient": BedrockClient,
@@ -138,12 +140,13 @@ def load_generator_config():
             if provider_config.get("client_class") in CLIENT_CLASSES:
                 provider_config["model_client"] = CLIENT_CLASSES[provider_config["client_class"]]
             # Fall back to default mapping based on provider_id
-            elif provider_id in ["google", "openai", "openrouter", "ollama", "bedrock", "azure", "dashscope", "litellm", "vllm"]:
+            elif provider_id in ["google", "openai", "openrouter", "ollama", "bedrock", "azure", "dashscope", "litellm", "vllm", "claude"]:
                 default_map = {
                     "google": GoogleGenAIClient,
                     "openai": OpenAIClient,
                     "litellm": LiteLLMClient,
                     "vllm": VLLMClient,
+                    "claude": ClaudeClient,
                     "openrouter": OpenRouterClient,
                     "ollama": OllamaClient,
                     "bedrock": BedrockClient,

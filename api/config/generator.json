@@ -124,6 +124,25 @@
         }
       }
     },
+    "claude": {
+      "client_class": "ClaudeClient",
+      "default_model": "claude-sonnet-4-6",
+      "supportsCustomModel": true,
+      "models": {
+        "claude-sonnet-4-6": {
+          "temperature": 0.7,
+          "max_tokens": 8192
+        },
+        "claude-opus-4-8": {
+          "temperature": 0.7,
+          "max_tokens": 8192
+        },
+        "claude-haiku-4-5-20251001": {
+          "temperature": 0.7,
+          "max_tokens": 8192
+        }
+      }
+    },
     "ollama": {
       "default_model": "qwen3:1.7b",
       "supportsCustomModel": true,
