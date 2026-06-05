@@ -1760,7 +1760,7 @@ IMPORTANT:
 
   // No longer needed as we use the modal directly
 
-  const confirmRefresh = useCallback(async (newToken?: string, forceRegenerate: boolean = false) => {
+  const confirmRefresh = useCallback(async (newToken?: string, forceRegenerate: boolean = false, overrideProvider?: string, overrideModel?: string) => {
     setShowModelOptions(false);
     setLoadingMessage(messages.loading?.clearingCache || 'Clearing server cache...');
     setIsLoading(true); // Show loading indicator immediately
@@ -1782,8 +1782,8 @@ IMPORTANT:
           repo: effectiveRepoInfo.repo,
           repo_type: effectiveRepoInfo.type,
           language: language,
-          provider: selectedProviderState,
-          model: selectedModelState,
+          provider: overrideProvider ?? selectedProviderState,
+          model: overrideModel ?? selectedModelState,
           is_custom_model: isCustomSelectedModelState.toString(),
           custom_model: customSelectedModelState,
           comprehensive: isComprehensiveView.toString(),
@@ -1843,7 +1843,7 @@ IMPORTANT:
     }
 
     // Proceed with the rest of the refresh logic
-    console.log('Refreshing wiki. Server cache will be overwritten upon new generation if not cleared.');
+    console.log('Refreshing wiki. Saved versions are kept unless Regenerate was used.');
 
     // Clear the localStorage cache (if any remnants or if it was used before this change)
     const localStorageCacheKey = getCacheKey(effectiveRepoInfo.owner, effectiveRepoInfo.repo, effectiveRepoInfo.type, language, isComprehensiveView);
@@ -2468,7 +2468,7 @@ IMPORTANT:
         includedFiles={modelIncludedFiles}
         setIncludedFiles={setModelIncludedFiles}
         onApply={(token?: string) => confirmRefresh(token, false)}
-        onForceRegenerate={(token?: string) => confirmRefresh(token, true)}
+        onForceRegenerate={(token?: string, provider?: string, model?: string) => confirmRefresh(token, true, provider, model)}
         showWikiType={true}
         showTokenInput={effectiveRepoInfo.type !== 'local' && !currentToken} // Show token input if not local and no current token
         repositoryType={effectiveRepoInfo.type as 'github' | 'gitlab' | 'bitbucket'}

@@ -18,7 +18,7 @@ interface ModelSelectionModalProps {
   customModel: string;
   setCustomModel: (value: string) => void;
   onApply: (token?: string) => void;
-  onForceRegenerate?: (token?: string) => void;
+  onForceRegenerate?: (token?: string, provider?: string, model?: string) => void;
 
   // Wiki type options
   isComprehensiveView: boolean;
@@ -138,7 +138,10 @@ export default function ModelSelectionModal({
   // Handler for forcing regeneration (deletes this model's saved wiki first)
   const handleForceRegenerate = () => {
     const token = commitSelections();
-    onForceRegenerate?.(token);
+    // Pass the just-committed selections explicitly: the parent's state hasn't
+    // re-rendered yet, so its confirmRefresh closure would otherwise see the
+    // previous provider/model and delete the wrong version's cache.
+    onForceRegenerate?.(token, localProvider, localModel);
     onClose();
   };
 
