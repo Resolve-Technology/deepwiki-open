@@ -71,7 +71,10 @@ export default function WikiReviewModal({
   const [applyProgress, setApplyProgress] = useState('');
   const [applySummary, setApplySummary] = useState('');
   const applyWsRef = useRef<WebSocket | null>(null);
-  const applyAbortedRef = useRef(false);
+  // Monotonic run token: bumping it invalidates any in-flight apply loop, and
+  // each run only proceeds while the token still equals the value it captured
+  // (a shared boolean could be reset by a NEW run, resurrecting an old loop).
+  const applyRunRef = useRef(0);
 
   // Load past reviews whenever the modal opens
   useEffect(() => {
@@ -104,7 +107,7 @@ export default function WikiReviewModal({
   // Abort and reset any apply flow when the modal closes (component stays mounted).
   useEffect(() => {
     if (!isOpen) {
-      applyAbortedRef.current = true;
+      applyRunRef.current++;
       closeWebSocket(applyWsRef.current);
       applyWsRef.current = null;
       setApplyPhase('idle');
@@ -203,7 +206,7 @@ ${wikiText}
     setApplyTarget(review);
     setApplyPhase('classifying');
     setApplySummary('');
-    applyAbortedRef.current = false;
+    const runId = ++applyRunRef.current;
     try {
       const response = await runChatOnce(
         {
@@ -213,7 +216,7 @@ ${wikiText}
         600_000,
         ws => { applyWsRef.current = ws; },
       );
-      if (applyAbortedRef.current) return; // modal closed mid-flight
+      if (applyRunRef.current !== runId) return; // modal closed or new run started mid-flight
       const affected = parseAffectedPages(response, pages);
       if (affected.length === 0) {
         setApplyPhase('done');
@@ -223,7 +226,7 @@ ${wikiText}
       setAffectedPages(affected);
       setApplyPhase('confirm');
     } catch (err) {
-      if (applyAbortedRef.current) return;
+      if (applyRunRef.current !== runId) return;
       setApplyPhase('idle');
       setReviewError(`Could not determine affected pages: ${err instanceof Error ? err.message : err}`);
     }
@@ -232,11 +235,15 @@ ${wikiText}
   // Phase 2 (after user confirmation): revise each affected page.
   const confirmApply = useCallback(async () => {
     if (!applyTarget) return;
+    // confirmApply runs as phase 2 of the run started by startApply, so it
+    // captures the current token without bumping — closing the modal (which
+    // bumps) or a new startApply (which bumps) both invalidate it.
+    const runId = applyRunRef.current;
     setApplyPhase('revising');
     const updated: Record<string, WikiPage> = {};
     let revised = 0, unchanged = 0, failed = 0;
     for (let i = 0; i < affectedPages.length; i++) {
-      if (applyAbortedRef.current) return; // modal closed mid-apply — discard
+      if (applyRunRef.current !== runId) return; // modal closed mid-apply — discard
       const page = affectedPages[i];
       setApplyProgress(`Revising ${page.title} (${i + 1}/${affectedPages.length})...`);
       try {
@@ -249,6 +256,7 @@ ${wikiText}
           600_000,
           ws => { applyWsRef.current = ws; },
         );
+        if (applyRunRef.current !== runId) return;
         const { content, changed } = parseRevisedContent(page.content, response);
         if (changed) {
           updated[page.id] = { ...page, content };
@@ -257,12 +265,12 @@ ${wikiText}
           unchanged++;
         }
       } catch (err) {
-        if (applyAbortedRef.current) return;
+        if (applyRunRef.current !== runId) return;
         console.warn(`Apply-review failed for ${page.title}, keeping original:`, err);
         failed++;
       }
     }
-    if (applyAbortedRef.current) return;
+    if (applyRunRef.current !== runId) return;
     if (Object.keys(updated).length > 0) {
       onPagesRevised?.(updated, { provider: reviewedProvider, model: reviewedModel });
     }
