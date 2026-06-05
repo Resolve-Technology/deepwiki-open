@@ -10,6 +10,7 @@ import ConfigurationModal from '@/components/ConfigurationModal';
 import ProcessedProjects from '@/components/ProcessedProjects';
 import { extractUrlPath, extractUrlDomain } from '@/utils/urlDecoder';
 import { useProcessedProjects } from '@/hooks/useProcessedProjects';
+import { APP_VERSION } from '@/version';
 
 import { useLanguage } from '@/contexts/LanguageContext';
 
@@ -129,6 +130,9 @@ export default function Home() {
 
   // Wiki type state - default to comprehensive view
   const [isComprehensiveView, setIsComprehensiveView] = useState<boolean>(true);
+
+  // Self-review pass: verify each generated page against the code (default on)
+  const [isSelfReviewEnabled, setIsSelfReviewEnabled] = useState<boolean>(true);
 
   const [excludedDirs, setExcludedDirs] = useState('');
   const [excludedFiles, setExcludedFiles] = useState('');
@@ -382,6 +386,9 @@ export default function Home() {
     // Add comprehensive parameter
     params.append('comprehensive', isComprehensiveView.toString());
 
+    // Self-review pass toggle (the wiki page defaults to true when absent)
+    params.append('self_review', isSelfReviewEnabled.toString());
+
     const queryString = params.toString() ? `?${params.toString()}` : '';
 
     // Navigate to the dynamic route
@@ -450,6 +457,8 @@ export default function Home() {
             supportedLanguages={supportedLanguages}
             isComprehensiveView={isComprehensiveView}
             setIsComprehensiveView={setIsComprehensiveView}
+            isSelfReviewEnabled={isSelfReviewEnabled}
+            setIsSelfReviewEnabled={setIsSelfReviewEnabled}
             provider={provider}
             setProvider={setProvider}
             model={model}
@@ -599,7 +608,9 @@ export default function Home() {
       <footer className="max-w-6xl mx-auto mt-8 flex flex-col gap-4 w-full">
         <div
           className="flex flex-col sm:flex-row justify-between items-center gap-4 bg-[var(--card-bg)] rounded-lg p-4 border border-[var(--border-color)] shadow-custom">
-          <p className="text-[var(--muted)] text-sm font-serif">{t('footer.copyright')}</p>
+          <p className="text-[var(--muted)] text-sm font-serif">
+            {t('footer.copyright')} <span className="opacity-70">· v{APP_VERSION}</span>
+          </p>
 
           <div className="flex items-center gap-6">
             <div className="flex items-center space-x-5">

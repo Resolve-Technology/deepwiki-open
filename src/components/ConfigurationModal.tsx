@@ -21,6 +21,10 @@ interface ConfigurationModalProps {
   isComprehensiveView: boolean;
   setIsComprehensiveView: (value: boolean) => void;
 
+  // Self-review pass (verify each generated page against the code)
+  isSelfReviewEnabled?: boolean;
+  setIsSelfReviewEnabled?: (value: boolean) => void;
+
   // Model selection
   provider: string;
   setProvider: (value: string) => void;
@@ -69,6 +73,8 @@ export default function ConfigurationModal({
   supportedLanguages,
   isComprehensiveView,
   setIsComprehensiveView,
+  isSelfReviewEnabled = true,
+  setIsSelfReviewEnabled,
   provider,
   setProvider,
   model,
@@ -206,6 +212,19 @@ export default function ConfigurationModal({
                   )}
                 </button>
               </div>
+
+              {/* Self-review pass toggle */}
+              {setIsSelfReviewEnabled && (
+                <label className="mt-3 flex items-center gap-2 text-sm text-[var(--foreground)] cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={isSelfReviewEnabled}
+                    onChange={(e) => setIsSelfReviewEnabled(e.target.checked)}
+                    className="accent-[var(--accent-primary)]"
+                  />
+                  Self-review pages against code (second pass, ~2x tokens)
+                </label>
+              )}
             </div>
 
             {/* Model Selector */}
