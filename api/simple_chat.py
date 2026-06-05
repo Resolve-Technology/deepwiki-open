@@ -444,9 +444,13 @@ async def chat_completions_stream(request: ChatCompletionRequest):
             model_kwargs = {
                 "model": request.model,
                 "stream": True,
-                "temperature": model_config["temperature"]
             }
-            # Only add top_p / max_tokens if present in the model config
+            # Only add sampling params / max_tokens if present in the model config.
+            # NOTE: Opus 4.7+ removed temperature/top_p/top_k (the API returns 400
+            # "temperature is deprecated for this model"), so those models must not
+            # have them in generator.json.
+            if "temperature" in model_config:
+                model_kwargs["temperature"] = model_config["temperature"]
             if "top_p" in model_config:
                 model_kwargs["top_p"] = model_config["top_p"]
             if "max_tokens" in model_config:
