@@ -130,15 +130,15 @@
       "supportsCustomModel": true,
       "models": {
         "claude-sonnet-4-6": {
-          "temperature": 0.7,
+          "temperature": 0.3,
           "max_tokens": 32768
         },
         "claude-opus-4-8": {
-          "temperature": 0.7,
+          "temperature": 0.3,
           "max_tokens": 32768
         },
         "claude-haiku-4-5-20251001": {
-          "temperature": 0.7,
+          "temperature": 0.3,
           "max_tokens": 32768
         }
       }
@@ -226,4 +226,3 @@
     }
   }
 }
-
