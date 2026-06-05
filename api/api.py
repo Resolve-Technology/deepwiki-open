@@ -111,6 +111,7 @@ class WikiCacheData(BaseModel):
     model: Optional[str] = None
     generated_at: Optional[str] = None  # ISO-8601 UTC, set server-side on save
     repo_commit: Optional[str] = None   # git HEAD of the analyzed clone, when resolvable
+    self_reviewed: Optional[bool] = None  # pages went through the self-review pass
 
 class WikiCacheRequest(BaseModel):
     """
@@ -122,6 +123,7 @@ class WikiCacheRequest(BaseModel):
     generated_pages: Dict[str, WikiPage]
     provider: str
     model: str
+    self_reviewed: Optional[bool] = None
 
 class WikiReviewData(BaseModel):
     """A cross-model review of one saved wiki version."""
@@ -640,7 +642,8 @@ async def save_wiki_cache(data: WikiCacheRequest) -> bool:
             provider=data.provider,
             model=data.model,
             generated_at=datetime.now(timezone.utc).isoformat(),
-            repo_commit=get_repo_commit(data.repo)
+            repo_commit=get_repo_commit(data.repo),
+            self_reviewed=data.self_reviewed,
         )
         # Log size of data to be cached for debugging (avoid logging full content if large)
         try:

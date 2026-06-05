@@ -364,3 +364,12 @@ def test_read_strips_token_from_legacy_files(cache_dir):
     data = asyncio.run(read_wiki_cache("owner", "repo", "github", "en",
                                        provider="claude", model="claude-sonnet-4-6"))
     assert data.repo.token is None
+
+
+def test_self_reviewed_flag_roundtrip(cache_dir):
+    req = make_cache_request("claude", "claude-sonnet-4-6")
+    req.self_reviewed = True
+    asyncio.run(save_wiki_cache(req))
+    data = asyncio.run(read_wiki_cache("owner", "repo", "github", "en",
+                                       provider="claude", model="claude-sonnet-4-6"))
+    assert data.self_reviewed is True
