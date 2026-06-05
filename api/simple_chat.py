@@ -15,6 +15,7 @@ from api.config import get_model_config, configs, OPENROUTER_API_KEY, OPENAI_API
 from api.data_pipeline import count_tokens, get_file_content
 from api.openai_client import OpenAIClient
 from api.vllm_client import VLLMClient
+from api.claude_client import ClaudeClient
 from api.litellm_client import LiteLLMClient
 from api.openrouter_client import OpenRouterClient
 from api.bedrock_client import BedrockClient
@@ -423,6 +424,27 @@ async def chat_completions_stream(request: ChatCompletionRequest):
                 model_kwargs=model_kwargs,
                 model_type=ModelType.LLM
             )
+        elif request.provider == "claude":
+            logger.info(f"Using Claude (OpenAI-compat protocol) with model: {request.model}")
+
+            # OAuth bearer token from `claude setup-token` (CLAUDE_OAUTH_TOKEN)
+            model = ClaudeClient()
+            model_kwargs = {
+                "model": request.model,
+                "stream": True,
+                "temperature": model_config["temperature"]
+            }
+            # Only add top_p / max_tokens if present in the model config
+            if "top_p" in model_config:
+                model_kwargs["top_p"] = model_config["top_p"]
+            if "max_tokens" in model_config:
+                model_kwargs["max_tokens"] = model_config["max_tokens"]
+
+            api_kwargs = model.convert_inputs_to_api_kwargs(
+                input=prompt,
+                model_kwargs=model_kwargs,
+                model_type=ModelType.LLM
+            )
         elif request.provider == "litellm":
             logger.info(f"Using LiteLLM (Openai protocol) with model: {request.model}")
 
@@ -534,7 +556,7 @@ async def chat_completions_stream(request: ChatCompletionRequest):
                     except Exception as e_openrouter:
                         logger.error(f"Error with OpenRouter API: {str(e_openrouter)}")
                         yield f"\nError with OpenRouter API: {str(e_openrouter)}\n\nPlease check that you have set the OPENROUTER_API_KEY environment variable with a valid API key."
-                elif request.provider in ("openai", "vllm", "litellm"):
+                elif request.provider in ("openai", "vllm", "litellm", "claude"):
                     try:
                         # Get the response and handle it properly using the previously created api_kwargs
                         logger.info("Making Openai API call")
@@ -666,7 +688,7 @@ async def chat_completions_stream(request: ChatCompletionRequest):
                             except Exception as e_fallback:
                                 logger.error(f"Error with OpenRouter API fallback: {str(e_fallback)}")
                                 yield f"\nError with OpenRouter API fallback: {str(e_fallback)}\n\nPlease check that you have set the OPENROUTER_API_KEY environment variable with a valid API key."
-                        elif request.provider in ("openai", "vllm", "litellm"):
+                        elif request.provider in ("openai", "vllm", "litellm", "claude"):
                             try:
                                 # Create new api_kwargs with the simplified prompt
                                 fallback_api_kwargs = model.convert_inputs_to_api_kwargs(

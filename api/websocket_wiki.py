@@ -23,6 +23,7 @@ from api.bedrock_client import BedrockClient
 from api.openai_client import OpenAIClient
 from api.litellm_client import LiteLLMClient
 from api.vllm_client import VLLMClient
+from api.claude_client import ClaudeClient
 from api.openrouter_client import OpenRouterClient
 from api.azureai_client import AzureAIClient
 from api.dashscope_client import DashscopeClient
@@ -551,6 +552,27 @@ This file contains...
                 model_kwargs=model_kwargs,
                 model_type=ModelType.LLM
             )
+        elif request.provider == "claude":
+            logger.info(f"Using Claude (OpenAI-compat protocol) with model: {request.model}")
+
+            # OAuth bearer token from `claude setup-token` (CLAUDE_OAUTH_TOKEN)
+            model = ClaudeClient()
+            model_kwargs = {
+                "model": request.model,
+                "stream": True,
+                "temperature": model_config["temperature"]
+            }
+            # Only add top_p / max_tokens if present in the model config
+            if "top_p" in model_config:
+                model_kwargs["top_p"] = model_config["top_p"]
+            if "max_tokens" in model_config:
+                model_kwargs["max_tokens"] = model_config["max_tokens"]
+
+            api_kwargs = model.convert_inputs_to_api_kwargs(
+                input=prompt,
+                model_kwargs=model_kwargs,
+                model_type=ModelType.LLM
+            )
         elif request.provider == "bedrock":
             logger.info(f"Using AWS Bedrock with model: {request.model}")
 
@@ -686,7 +708,7 @@ This file contains...
                     await websocket.send_text(error_msg)
                     # Close the WebSocket connection after sending the error message
                     await websocket.close()
-            elif request.provider in ("litellm", "vllm"):
+            elif request.provider in ("litellm", "vllm", "claude"):
                 try:
                     # Get the response and handle it properly using the previously created api_kwargs
                     logger.info("Making LiteLLM API call")
@@ -861,7 +883,7 @@ This file contains...
                             logger.error(f"Error with Openai API fallback: {str(e_fallback)}")
                             error_msg = f"\nError with Openai API fallback: {str(e_fallback)}\n\nPlease check that you have set the OPENAI_API_KEY environment variable with a valid API key."
                             await websocket.send_text(error_msg)
-                    elif request.provider in ("litellm", "vllm"):
+                    elif request.provider in ("litellm", "vllm", "claude"):
                         try:
                             # Create new api_kwargs with the simplified prompt
                             fallback_api_kwargs = model.convert_inputs_to_api_kwargs(
