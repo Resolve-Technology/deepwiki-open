@@ -1798,6 +1798,53 @@ IMPORTANT:
     }
   }, [wikiStructure, generatedPages, effectiveRepoInfo, language, selectedProviderState, selectedModelState, wikiMeta]);
 
+  // Persist pages revised by applying a Model Review: merge into state and
+  // save explicitly (the auto-save effect is gated off for cache-loaded wikis).
+  const handlePagesRevised = useCallback(async (updated: Record<string, WikiPage>, target: { provider: string; model: string }) => {
+    // The apply runs for minutes; refuse if the user switched wiki versions
+    // meanwhile — merging model A's revisions into model B's pages would
+    // silently corrupt the other version's cache.
+    if (target.provider !== selectedProviderState || target.model !== selectedModelState) {
+      setError(`Review was applied to ${target.provider}/${target.model}, but ${selectedProviderState}/${selectedModelState} is now loaded — revisions were discarded. Reload that version and apply again.`);
+      return;
+    }
+    const mergedPages = { ...generatedPages, ...updated };
+    setGeneratedPages(mergedPages);
+    if (!wikiStructure) return;
+    try {
+      const response = await fetch(`/api/wiki_cache`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          repo: effectiveRepoInfo,
+          language: language,
+          comprehensive: isComprehensiveView,
+          wiki_structure: {
+            ...wikiStructure,
+            sections: wikiStructure.sections || [],
+            rootSections: wikiStructure.rootSections || [],
+          },
+          generated_pages: mergedPages,
+          provider: selectedProviderState,
+          model: selectedModelState,
+          self_reviewed: wikiMeta.selfReviewed,
+        }),
+      });
+      if (response.ok) {
+        const result = await response.json().catch(() => null);
+        if (result) {
+          setWikiMeta(prev => ({ ...prev, generatedAt: result.generated_at, repoCommit: result.repo_commit }));
+        }
+      } else {
+        console.error('Failed to save revised wiki:', response.status, await response.text());
+        setError('Revised pages are shown but could not be saved to the server cache.');
+      }
+    } catch (err) {
+      console.error('Error saving revised wiki:', err);
+      setError('Revised pages are shown but could not be saved to the server cache.');
+    }
+  }, [generatedPages, wikiStructure, effectiveRepoInfo, language, isComprehensiveView, selectedProviderState, selectedModelState, wikiMeta.selfReviewed]);
+
   // No longer needed as we use the modal directly
 
   const confirmRefresh = useCallback(async (newToken?: string, forceRegenerate: boolean = false, overrideProvider?: string, overrideModel?: string) => {
@@ -2554,6 +2601,7 @@ IMPORTANT:
         reviewedProvider={selectedProviderState}
         reviewedModel={selectedModelState}
         token={currentToken}
+        onPagesRevised={handlePagesRevised}
       />
     </div>
   );

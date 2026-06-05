@@ -7,6 +7,7 @@ import RepoInfo from '@/types/repoinfo';
 import getRepoUrl from '@/utils/getRepoUrl';
 import { createChatWebSocket, closeWebSocket, ChatCompletionRequest } from '@/utils/websocketClient';
 import { WikiPage } from '@/types/wiki/wikipage';
+import { runChatOnce, buildPageRagQuery, buildAffectedPagesPrompt, parseAffectedPages, buildApplyReviewPrompt, parseRevisedContent } from '@/utils/wikiRevision';
 
 // Char budget for wiki content embedded in the review prompt (~20k tokens),
 // sized so smaller reviewer models (e.g. 32k-context vLLM) still fit the
@@ -33,6 +34,12 @@ interface WikiReviewModalProps {
   reviewedProvider: string;   // provider/model that generated the loaded wiki
   reviewedModel: string;
   token?: string;
+  /**
+   * Receives pages whose content was revised by applying a review, together
+   * with the wiki version they belong to (so the receiver can refuse the save
+   * if the user switched versions mid-apply).
+   */
+  onPagesRevised?: (updated: Record<string, WikiPage>, target: { provider: string; model: string }) => void;
 }
 
 export default function WikiReviewModal({
@@ -44,6 +51,7 @@ export default function WikiReviewModal({
   reviewedProvider,
   reviewedModel,
   token,
+  onPagesRevised,
 }: WikiReviewModalProps) {
   const [reviewerProvider, setReviewerProvider] = useState('');
   const [reviewerModel, setReviewerModel] = useState('');
@@ -55,6 +63,15 @@ export default function WikiReviewModal({
   const [pastReviews, setPastReviews] = useState<WikiReview[]>([]);
   const webSocketRef = useRef<WebSocket | null>(null);
   const abortedRef = useRef(false);
+
+  type ApplyPhase = 'idle' | 'classifying' | 'confirm' | 'revising' | 'done';
+  const [applyPhase, setApplyPhase] = useState<ApplyPhase>('idle');
+  const [applyTarget, setApplyTarget] = useState<WikiReview | null>(null);
+  const [affectedPages, setAffectedPages] = useState<WikiPage[]>([]);
+  const [applyProgress, setApplyProgress] = useState('');
+  const [applySummary, setApplySummary] = useState('');
+  const applyWsRef = useRef<WebSocket | null>(null);
+  const applyAbortedRef = useRef(false);
 
   // Load past reviews whenever the modal opens
   useEffect(() => {
@@ -81,6 +98,20 @@ export default function WikiReviewModal({
       closeWebSocket(webSocketRef.current);
       webSocketRef.current = null;
       setIsReviewing(false);
+    }
+  }, [isOpen]);
+
+  // Abort and reset any apply flow when the modal closes (component stays mounted).
+  useEffect(() => {
+    if (!isOpen) {
+      applyAbortedRef.current = true;
+      closeWebSocket(applyWsRef.current);
+      applyWsRef.current = null;
+      setApplyPhase('idle');
+      setApplyTarget(null);
+      setAffectedPages([]);
+      setApplyProgress('');
+      setApplySummary('');
     }
   }, [isOpen]);
 
@@ -158,6 +189,88 @@ ${wikiText}
     }
   }, [repoInfo, language, reviewedProvider, reviewedModel]);
 
+  const wikiRequestBase = useCallback((): Omit<ChatCompletionRequest, 'messages'> => ({
+    repo_url: getRepoUrl(repoInfo),
+    type: repoInfo.type,
+    provider: reviewedProvider,
+    model: reviewedModel,
+    language: language,
+    token: token,
+  }), [repoInfo, reviewedProvider, reviewedModel, language, token]);
+
+  // Phase 1: ask the wiki's own model which pages the review affects.
+  const startApply = useCallback(async (review: WikiReview) => {
+    setApplyTarget(review);
+    setApplyPhase('classifying');
+    setApplySummary('');
+    applyAbortedRef.current = false;
+    try {
+      const response = await runChatOnce(
+        {
+          ...wikiRequestBase(),
+          messages: [{ role: 'user', content: buildAffectedPagesPrompt(review.content, pages) }],
+        },
+        600_000,
+        ws => { applyWsRef.current = ws; },
+      );
+      if (applyAbortedRef.current) return; // modal closed mid-flight
+      const affected = parseAffectedPages(response, pages);
+      if (affected.length === 0) {
+        setApplyPhase('done');
+        setApplySummary('The review does not call for content changes to any page.');
+        return;
+      }
+      setAffectedPages(affected);
+      setApplyPhase('confirm');
+    } catch (err) {
+      if (applyAbortedRef.current) return;
+      setApplyPhase('idle');
+      setReviewError(`Could not determine affected pages: ${err instanceof Error ? err.message : err}`);
+    }
+  }, [pages, wikiRequestBase]);
+
+  // Phase 2 (after user confirmation): revise each affected page.
+  const confirmApply = useCallback(async () => {
+    if (!applyTarget) return;
+    setApplyPhase('revising');
+    const updated: Record<string, WikiPage> = {};
+    let revised = 0, unchanged = 0, failed = 0;
+    for (let i = 0; i < affectedPages.length; i++) {
+      if (applyAbortedRef.current) return; // modal closed mid-apply — discard
+      const page = affectedPages[i];
+      setApplyProgress(`Revising ${page.title} (${i + 1}/${affectedPages.length})...`);
+      try {
+        const response = await runChatOnce(
+          {
+            ...wikiRequestBase(),
+            messages: [{ role: 'user', content: buildApplyReviewPrompt(page, applyTarget.content, getRepoUrl(repoInfo)) }],
+            rag_query: buildPageRagQuery(page),
+          },
+          600_000,
+          ws => { applyWsRef.current = ws; },
+        );
+        const { content, changed } = parseRevisedContent(page.content, response);
+        if (changed) {
+          updated[page.id] = { ...page, content };
+          revised++;
+        } else {
+          unchanged++;
+        }
+      } catch (err) {
+        if (applyAbortedRef.current) return;
+        console.warn(`Apply-review failed for ${page.title}, keeping original:`, err);
+        failed++;
+      }
+    }
+    if (applyAbortedRef.current) return;
+    if (Object.keys(updated).length > 0) {
+      onPagesRevised?.(updated, { provider: reviewedProvider, model: reviewedModel });
+    }
+    setApplyPhase('done');
+    setApplyProgress('');
+    setApplySummary(`Revised ${revised} page(s), ${unchanged} unchanged, ${failed} failed.`);
+  }, [applyTarget, affectedPages, wikiRequestBase, repoInfo, onPagesRevised, reviewedProvider, reviewedModel]);
+
   const startReview = useCallback(() => {
     const effectiveModel = isCustomModel ? customModel : reviewerModel;
     if (!reviewerProvider || !effectiveModel) {
@@ -208,6 +321,10 @@ ${wikiText}
     );
   }, [reviewerProvider, reviewerModel, isCustomModel, customModel, repoInfo, language, token, buildReviewPrompt, buildRagQuery, saveReview]);
 
+  const canApply = (review: WikiReview) =>
+    review.reviewed_provider === reviewedProvider && review.reviewed_model === reviewedModel &&
+    pages.length > 0 && applyPhase === 'idle';
+
   if (!isOpen) return null;
 
   return (
@@ -256,31 +373,99 @@ ${wikiText}
             {reviewContent && (
               <div className="mt-4 p-4 rounded-md border border-[var(--border-color)] bg-[var(--background)]">
                 <Markdown content={reviewContent} />
+                {!isReviewing && (() => {
+                  const effectiveReviewerModel = isCustomModel ? customModel : reviewerModel;
+                  const liveReview: WikiReview = {
+                    repo: repoInfo,
+                    language,
+                    reviewed_provider: reviewedProvider,
+                    reviewed_model: reviewedModel,
+                    reviewer_provider: reviewerProvider,
+                    reviewer_model: effectiveReviewerModel,
+                    content: reviewContent,
+                  };
+                  const providerModelMatch = liveReview.reviewed_provider === reviewedProvider && liveReview.reviewed_model === reviewedModel;
+                  return (
+                    <div className="mt-3">
+                      <button
+                        type="button"
+                        onClick={() => startApply(liveReview)}
+                        disabled={!canApply(liveReview)}
+                        title={!providerModelMatch ? 'Load this review\'s wiki version first' : undefined}
+                        className="px-3 py-1.5 text-sm rounded-md bg-[var(--accent-primary)]/90 text-white hover:bg-[var(--accent-primary)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      >
+                        Apply to wiki
+                      </button>
+                    </div>
+                  );
+                })()}
               </div>
             )}
+
+            {/* Apply flow status blocks */}
+            {applyPhase === 'confirm' && (
+              <div className="mt-4 p-4 rounded-md border border-[var(--accent-primary)]/40">
+                <p className="text-sm text-[var(--foreground)] mb-2">
+                  This review affects {affectedPages.length} page(s). Revise them with {reviewedProvider}/{reviewedModel}?
+                </p>
+                <ul className="text-sm text-[var(--muted)] list-disc ml-5 mb-3">
+                  {affectedPages.map(p => <li key={p.id}>{p.title}</li>)}
+                </ul>
+                <div className="flex gap-2">
+                  <button type="button" onClick={confirmApply}
+                    className="px-3 py-1.5 text-sm rounded-md bg-[var(--accent-primary)]/90 text-white hover:bg-[var(--accent-primary)]">
+                    Apply changes
+                  </button>
+                  <button type="button" onClick={() => { setApplyPhase('idle'); setAffectedPages([]); }}
+                    className="px-3 py-1.5 text-sm rounded-md border border-[var(--border-color)] text-[var(--muted)]">
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+            {applyPhase === 'classifying' && <p className="mt-3 text-sm text-[var(--muted)]">Determining affected pages…</p>}
+            {applyPhase === 'revising' && <p className="mt-3 text-sm text-[var(--muted)]">{applyProgress}</p>}
+            {applyPhase === 'done' && applySummary && <p className="mt-3 text-sm text-[var(--foreground)]">{applySummary}</p>}
 
             {/* Past reviews */}
             {pastReviews.length > 0 && !reviewContent && (
               <div className="mt-6">
                 <h4 className="text-sm font-medium text-[var(--foreground)] mb-2">Saved reviews</h4>
                 <div className="space-y-2">
-                  {pastReviews.map((review) => (
-                    <button
-                      key={`${review.reviewed_provider}~${review.reviewed_model}~${review.reviewer_provider}~${review.reviewer_model}`}
-                      type="button"
-                      onClick={() => setReviewContent(review.content)}
-                      className="block w-full text-left p-3 rounded-md border border-[var(--border-color)] hover:bg-[var(--background)] transition-colors"
-                    >
-                      <span className="text-sm text-[var(--foreground)]">
-                        {review.reviewed_provider}/{review.reviewed_model} reviewed by {review.reviewer_provider}/{review.reviewer_model}
-                      </span>
-                      {review.created_at && (
-                        <span className="block text-xs text-[var(--muted)] mt-1">
-                          {new Date(review.created_at).toLocaleString()}
-                        </span>
-                      )}
-                    </button>
-                  ))}
+                  {pastReviews.map((review) => {
+                    const key = `${review.reviewed_provider}~${review.reviewed_model}~${review.reviewer_provider}~${review.reviewer_model}`;
+                    const providerModelMatch = review.reviewed_provider === reviewedProvider && review.reviewed_model === reviewedModel;
+                    return (
+                      <div
+                        key={key}
+                        className="flex items-center gap-2 p-3 rounded-md border border-[var(--border-color)] hover:bg-[var(--background)] transition-colors"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => setReviewContent(review.content)}
+                          className="flex-1 text-left"
+                        >
+                          <span className="text-sm text-[var(--foreground)]">
+                            {review.reviewed_provider}/{review.reviewed_model} reviewed by {review.reviewer_provider}/{review.reviewer_model}
+                          </span>
+                          {review.created_at && (
+                            <span className="block text-xs text-[var(--muted)] mt-1">
+                              {new Date(review.created_at).toLocaleString()}
+                            </span>
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => startApply(review)}
+                          disabled={!canApply(review)}
+                          title={!providerModelMatch ? 'Load this review\'s wiki version first' : undefined}
+                          className="flex-shrink-0 px-2 py-1 text-xs rounded-md bg-[var(--accent-primary)]/90 text-white hover:bg-[var(--accent-primary)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        >
+                          Apply
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -298,7 +483,7 @@ ${wikiText}
             <button
               type="button"
               onClick={startReview}
-              disabled={isReviewing || pages.length === 0}
+              disabled={isReviewing || pages.length === 0 || applyPhase === 'classifying' || applyPhase === 'revising'}
               className="px-4 py-2 text-sm font-medium rounded-md border border-transparent bg-[var(--accent-primary)]/90 text-white hover:bg-[var(--accent-primary)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               {isReviewing ? 'Reviewing…' : 'Start Review'}
