@@ -23,6 +23,8 @@ interface ModelSelectionModalProps {
   // Wiki type options
   isComprehensiveView: boolean;
   setIsComprehensiveView: (value: boolean) => void;
+  isSelfReviewEnabled?: boolean;
+  setIsSelfReviewEnabled?: (value: boolean) => void;
 
   // File filter options - optional
   excludedDirs?: string;
@@ -61,6 +63,8 @@ export default function ModelSelectionModal({
   onForceRegenerate,
   isComprehensiveView,
   setIsComprehensiveView,
+  isSelfReviewEnabled = true,
+  setIsSelfReviewEnabled,
   excludedDirs = '',
   setExcludedDirs,
   excludedFiles = '',
@@ -86,6 +90,7 @@ export default function ModelSelectionModal({
   const [localIsCustomModel, setLocalIsCustomModel] = useState(isCustomModel);
   const [localCustomModel, setLocalCustomModel] = useState(customModel);
   const [localIsComprehensiveView, setLocalIsComprehensiveView] = useState(isComprehensiveView);
+  const [localIsSelfReviewEnabled, setLocalIsSelfReviewEnabled] = useState(isSelfReviewEnabled);
   const [localExcludedDirs, setLocalExcludedDirs] = useState(excludedDirs);
   const [localExcludedFiles, setLocalExcludedFiles] = useState(excludedFiles);
   const [localIncludedDirs, setLocalIncludedDirs] = useState(includedDirs);
@@ -104,6 +109,7 @@ export default function ModelSelectionModal({
       setLocalIsCustomModel(isCustomModel);
       setLocalCustomModel(customModel);
       setLocalIsComprehensiveView(isComprehensiveView);
+      setLocalIsSelfReviewEnabled(isSelfReviewEnabled);
       setLocalExcludedDirs(excludedDirs);
       setLocalExcludedFiles(excludedFiles);
       setLocalIncludedDirs(includedDirs);
@@ -112,7 +118,7 @@ export default function ModelSelectionModal({
       setLocalAccessToken('');
       setShowTokenSection(showTokenInput);
     }
-  }, [isOpen, provider, model, isCustomModel, customModel, isComprehensiveView, excludedDirs, excludedFiles, includedDirs, includedFiles, repositoryType, showTokenInput]);
+  }, [isOpen, provider, model, isCustomModel, customModel, isComprehensiveView, isSelfReviewEnabled, excludedDirs, excludedFiles, includedDirs, includedFiles, repositoryType, showTokenInput]);
 
   // Commits the local form state to the parent and returns the token (if any)
   const commitSelections = () => {
@@ -121,6 +127,7 @@ export default function ModelSelectionModal({
     setIsCustomModel(localIsCustomModel);
     setCustomModel(localCustomModel);
     setIsComprehensiveView(localIsComprehensiveView);
+    if (setIsSelfReviewEnabled) setIsSelfReviewEnabled(localIsSelfReviewEnabled);
     if (setExcludedDirs) setExcludedDirs(localExcludedDirs);
     if (setExcludedFiles) setExcludedFiles(localExcludedFiles);
     if (setIncludedDirs) setIncludedDirs(localIncludedDirs);
@@ -176,6 +183,17 @@ export default function ModelSelectionModal({
                     setIsComprehensiveView={setLocalIsComprehensiveView}
                 />
             }
+            {showWikiType && (
+              <label className="mt-3 flex items-center gap-2 text-sm text-[var(--foreground)] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={localIsSelfReviewEnabled}
+                  onChange={(e) => setLocalIsSelfReviewEnabled(e.target.checked)}
+                  className="accent-[var(--accent-primary)]"
+                />
+                Self-review pages against code (second pass, ~2x tokens)
+              </label>
+            )}
 
             {/* Divider */}
             <div className="my-4 border-t border-[var(--border-color)]/30"></div>

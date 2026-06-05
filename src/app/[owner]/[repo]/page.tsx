@@ -10,7 +10,8 @@ import WikiTreeView from '@/components/WikiTreeView';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { RepoInfo } from '@/types/repoinfo';
 import getRepoUrl from '@/utils/getRepoUrl';
-import { getWebSocketUrl } from '@/utils/websocketClient';
+import { getWebSocketUrl, ChatCompletionRequest } from '@/utils/websocketClient';
+import { runChatOnce, buildPageRagQuery, buildSelfReviewPrompt, parseRevisedContent } from '@/utils/wikiRevision';
 import { extractUrlDomain, extractUrlPath } from '@/utils/urlDecoder';
 import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
@@ -249,7 +250,7 @@ export default function RepoWikiPage() {
   const [customSelectedModelState, setCustomSelectedModelState] = useState(customModelParam);
   const [showModelOptions, setShowModelOptions] = useState(false); // Controls whether to show model options
   const [refreshNonce, setRefreshNonce] = useState(0);
-  const [wikiMeta, setWikiMeta] = useState<{ generatedAt?: string; repoCommit?: string }>({});
+  const [wikiMeta, setWikiMeta] = useState<{ generatedAt?: string; repoCommit?: string; selfReviewed?: boolean }>({});
   const excludedDirs = searchParams.get('excluded_dirs') || '';
   const excludedFiles = searchParams.get('excluded_files') || '';
   const [modelExcludedDirs, setModelExcludedDirs] = useState(excludedDirs);
@@ -262,7 +263,9 @@ export default function RepoWikiPage() {
 
   // Wiki type state - default to comprehensive view
   const isComprehensiveParam = searchParams.get('comprehensive') !== 'false';
+  const isSelfReviewParam = searchParams.get('self_review') !== 'false';
   const [isComprehensiveView, setIsComprehensiveView] = useState(isComprehensiveParam);
+  const [isSelfReviewEnabled, setIsSelfReviewEnabled] = useState(isSelfReviewParam);
   // Using useRef for activeContentRequests to maintain a single instance across renders
   // This map tracks which pages are currently being processed to prevent duplicate requests
   // Note: In a multi-threaded environment, additional synchronization would be needed,
@@ -769,6 +772,40 @@ IMPORTANT: Generate the content in ${language === 'en' ? 'English' :
 
         console.log(`Received content for ${page.title}, length: ${content.length} characters`);
 
+        // Self-review pass: a fresh request to the same model verifies the page
+        // against the repo code (RAG via rag_query) and corrects it. Toggleable;
+        // any failure keeps the original content.
+        if (isSelfReviewEnabled && content.trim() && !content.startsWith('Error')) {
+          setLoadingMessage(`Reviewing ${page.title} against the codebase...`);
+          try {
+            const reviewBody: Record<string, any> = {  // eslint-disable-line @typescript-eslint/no-explicit-any
+              repo_url: repoUrl,
+              type: effectiveRepoInfo.type,
+              messages: [{
+                role: 'user',
+                content: buildSelfReviewPrompt({ ...page, content }, repoUrl),
+              }],
+              rag_query: buildPageRagQuery(page),
+            };
+            // Deep-dive pages get the full program source injected server-side
+            // during generation; give the review pass the same grounding.
+            if (isDeepDive && page.filePaths.length > 0) {
+              reviewBody.filePath = page.filePaths[0];
+            }
+            addTokensToRequestBody(reviewBody, currentToken, effectiveRepoInfo.type, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, language, modelExcludedDirs, modelExcludedFiles, modelIncludedDirs, modelIncludedFiles);
+            const reviewed = await runChatOnce(reviewBody as unknown as ChatCompletionRequest);
+            const { content: corrected, changed } = parseRevisedContent(content, reviewed);
+            if (changed) {
+              console.log(`Self-review corrected ${page.title} (${content.length} -> ${corrected.length} chars)`);
+              content = corrected;
+            } else {
+              console.log(`Self-review: no changes for ${page.title}`);
+            }
+          } catch (reviewErr) {
+            console.warn(`Self-review failed for ${page.title}, keeping original:`, reviewErr);
+          }
+        }
+
         // Store the FINAL generated content
         const updatedPage = { ...page, content };
         setGeneratedPages(prev => ({ ...prev, [page.id]: updatedPage }));
@@ -801,7 +838,7 @@ IMPORTANT: Generate the content in ${language === 'en' ? 'English' :
         setLoadingMessage(undefined); // Clear specific loading message
       }
     });
-  }, [generatedPages, currentToken, effectiveRepoInfo, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, modelExcludedDirs, modelExcludedFiles, language, activeContentRequests, generateFileUrl]);
+  }, [generatedPages, currentToken, effectiveRepoInfo, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, modelExcludedDirs, modelExcludedFiles, language, activeContentRequests, generateFileUrl, isSelfReviewEnabled]);
 
   // Determine the wiki structure from repository data
   const determineWikiStructure = useCallback(async (fileTree: string, readme: string, owner: string, repo: string) => {
@@ -1918,7 +1955,7 @@ IMPORTANT:
               if(cachedData.provider) {
                 setSelectedProviderState(cachedData.provider);
               }
-              setWikiMeta({ generatedAt: cachedData.generated_at, repoCommit: cachedData.repo_commit });
+              setWikiMeta({ generatedAt: cachedData.generated_at, repoCommit: cachedData.repo_commit, selfReviewed: cachedData.self_reviewed });
 
               // Update repoInfo
               if(cachedData.repo) {
@@ -2110,7 +2147,8 @@ IMPORTANT:
               wiki_structure: structureToCache,
               generated_pages: generatedPages,
               provider: selectedProviderState,
-              model: selectedModelState
+              model: selectedModelState,
+              self_reviewed: isSelfReviewEnabled,
             };
             const response = await fetch(`/api/wiki_cache`, {
               method: 'POST',
@@ -2124,7 +2162,7 @@ IMPORTANT:
               console.log('Wiki data successfully saved to server cache');
               const result = await response.json().catch(() => null);
               if (result) {
-                setWikiMeta({ generatedAt: result.generated_at, repoCommit: result.repo_commit });
+                setWikiMeta({ generatedAt: result.generated_at, repoCommit: result.repo_commit, selfReviewed: isSelfReviewEnabled });
               }
             } else {
               console.error('Error saving wiki data to server cache:', response.status, await response.text());
@@ -2137,7 +2175,7 @@ IMPORTANT:
     };
 
     saveCache();
-  }, [isLoading, error, wikiStructure, generatedPages, effectiveRepoInfo.owner, effectiveRepoInfo.repo, effectiveRepoInfo.type, effectiveRepoInfo.repoUrl, repoUrl, language, isComprehensiveView, selectedProviderState, selectedModelState]);
+  }, [isLoading, error, wikiStructure, generatedPages, effectiveRepoInfo.owner, effectiveRepoInfo.repo, effectiveRepoInfo.type, effectiveRepoInfo.repoUrl, repoUrl, language, isComprehensiveView, selectedProviderState, selectedModelState, isSelfReviewEnabled]);
 
   const handlePageSelect = (pageId: string) => {
     if (currentPageId != pageId) {
@@ -2375,6 +2413,7 @@ IMPORTANT:
                   {selectedProviderState && selectedModelState && (
                     <p className="text-xs text-[var(--muted)] mb-4">
                       Generated by {selectedProviderState}/{selectedModelState}
+                      {wikiMeta.selfReviewed ? ' · self-reviewed' : ''}
                       {wikiMeta.generatedAt ? ` · ${new Date(wikiMeta.generatedAt).toLocaleString()}` : ''}
                     </p>
                   )}
@@ -2485,6 +2524,8 @@ IMPORTANT:
         setCustomModel={setCustomSelectedModelState}
         isComprehensiveView={isComprehensiveView}
         setIsComprehensiveView={setIsComprehensiveView}
+        isSelfReviewEnabled={isSelfReviewEnabled}
+        setIsSelfReviewEnabled={setIsSelfReviewEnabled}
         showFileFilters={true}
         excludedDirs={modelExcludedDirs}
         setExcludedDirs={setModelExcludedDirs}
