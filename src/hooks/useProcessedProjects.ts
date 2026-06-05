@@ -8,6 +8,8 @@ interface ProcessedProject {
   repo_type: string;
   submittedAt: number;
   language: string;
+  provider?: string;
+  model?: string;
 }
 
 export function useProcessedProjects() {
