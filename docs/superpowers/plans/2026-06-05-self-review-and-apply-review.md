@@ -40,10 +40,15 @@ import { WikiPage } from '@/types/wiki/wikipage';
 
 export const NO_CHANGES_TOKEN = 'NO_CHANGES';
 
-/** Runs a single chat request to completion and resolves with the full text. */
+/**
+ * Runs a single chat request to completion and resolves with the full text.
+ * `onSocket` exposes the underlying WebSocket so callers can abort it (e.g.
+ * when a modal closes mid-flight).
+ */
 export function runChatOnce(
   request: ChatCompletionRequest,
   timeoutMs: number = 600_000,
+  onSocket?: (ws: WebSocket) => void,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     let content = '';
@@ -80,6 +85,7 @@ export function runChatOnce(
           }
         }),
     );
+    onSocket?.(ws);
   });
 }
 
@@ -122,15 +128,29 @@ Reply with ONLY the exact titles of pages that need changes, one per line, copie
 export function parseAffectedPages(response: string, pages: WikiPage[]): WikiPage[] {
   const trimmed = response.trim();
   if (!trimmed || trimmed.toUpperCase() === 'NONE') return [];
-  const byTitle = new Map(pages.map(p => [p.title.trim().toLowerCase(), p]));
+  // Duplicate titles map to ALL pages sharing the title (better to revise an
+  // extra page than to silently skip one).
+  const byTitle = new Map<string, WikiPage[]>();
+  for (const p of pages) {
+    const key = p.title.trim().toLowerCase();
+    const list = byTitle.get(key) ?? [];
+    list.push(p);
+    byTitle.set(key, list);
+  }
   const seen = new Set<string>();
   const affected: WikiPage[] = [];
   for (const line of trimmed.split('\n')) {
-    const key = line.replace(/^[-*\d.\s]+/, '').trim().toLowerCase();
-    const page = byTitle.get(key);
-    if (page && !seen.has(page.id)) {
-      seen.add(page.id);
-      affected.push(page);
+    // Try the verbatim line first so titles that legitimately start with
+    // numbering/dashes ("3. Architecture") still match; then the
+    // bullet-stripped form for "- Title" style responses.
+    const raw = line.trim().toLowerCase();
+    const stripped = line.replace(/^[-*\d.\s]+/, '').trim().toLowerCase();
+    const matches = byTitle.get(raw) ?? byTitle.get(stripped) ?? [];
+    for (const page of matches) {
+      if (!seen.has(page.id)) {
+        seen.add(page.id);
+        affected.push(page);
+      }
     }
   }
   return affected;
@@ -162,9 +182,19 @@ export function parseRevisedContent(
 ): { content: string; changed: boolean } {
   let cleaned = response.trim();
   if (!cleaned) return { content: original, changed: false };
-  // Strip a whole-page markdown fence like the generation path does.
-  cleaned = cleaned.replace(/^```(?:markdown)?\s*/i, '').replace(/```\s*$/i, '').trim();
-  if (!cleaned || cleaned === NO_CHANGES_TOKEN || cleaned.startsWith('Error:')) {
+  // Unwrap a whole-page ```markdown fence (models sometimes wrap the entire
+  // reply). ONLY the explicit "markdown" language tag is treated as a wrapper:
+  // a bare leading ``` could be the page's own first code block, and stripping
+  // a lone trailing fence corrupts pages that end with a mermaid/code block —
+  // the resulting unbalanced page would then be saved as a "correction".
+  if (/^```markdown\s*\n/i.test(cleaned)) {
+    cleaned = cleaned.replace(/^```markdown\s*\n/i, '').replace(/\n?```\s*$/, '').trim();
+  }
+  if (
+    !cleaned ||
+    cleaned.startsWith('Error:') ||
+    new RegExp(`^${NO_CHANGES_TOKEN}\\b.{0,10}$`).test(cleaned)
+  ) {
     return { content: original, changed: false };
   }
   if (cleaned.length < original.length * 0.3) {
@@ -226,7 +256,7 @@ In `save_wiki_cache`, add to the `WikiCacheData(...)` payload construction:
             self_reviewed=data.self_reviewed,
 ```
 
-- [ ] **Step 3: Run the full backend test file — all pass (35 + new = 36 in this file; also run the legacy `test/` dir).**
+- [ ] **Step 3: Run the full backend test file — all pass (34 existing + 1 new = 35 in this file; also run the legacy `test/` dir).**
 
 - [ ] **Step 4: Commit**
 
@@ -283,6 +313,11 @@ In `generatePageContent`, locate the completion point (search for `// Clean up m
               }],
               rag_query: buildPageRagQuery(page),
             };
+            // Deep-dive pages get the full program source injected server-side
+            // during generation; give the review pass the same grounding.
+            if (isDeepDive && page.filePaths.length > 0) {
+              reviewBody.filePath = page.filePaths[0];
+            }
             addTokensToRequestBody(reviewBody, currentToken, effectiveRepoInfo.type, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, language, modelExcludedDirs, modelExcludedFiles, modelIncludedDirs, modelIncludedFiles);
             const reviewed = await runChatOnce(reviewBody as ChatCompletionRequest);
             const { content: corrected, changed } = parseRevisedContent(content, reviewed);
@@ -305,7 +340,7 @@ Notes for the implementer:
 
 - [ ] **Step 3: Carry the flag into the cache metadata**
 
-(a) In the `saveCache` effect's `dataToCache` (search `provider: selectedProviderState`), add:
+(a) In the `saveCache` effect's `dataToCache` object (search `const dataToCache` — note `provider: selectedProviderState` alone is NOT unique, it also appears in `exportWiki`), add:
 
 ```typescript
               self_reviewed: isSelfReviewEnabled,
@@ -396,8 +431,12 @@ git commit -m "feat: per-page self-review pass during wiki generation (toggleabl
 (a) Props — add to `WikiReviewModalProps`:
 
 ```typescript
-  /** Receives pages whose content was revised by applying a review. */
-  onPagesRevised?: (updated: Record<string, WikiPage>) => void;
+  /**
+   * Receives pages whose content was revised by applying a review, together
+   * with the wiki version they belong to (so the receiver can refuse the save
+   * if the user switched versions mid-apply).
+   */
+  onPagesRevised?: (updated: Record<string, WikiPage>, target: { provider: string; model: string }) => void;
 ```
 
 (b) Imports:
@@ -415,9 +454,29 @@ import { runChatOnce, buildPageRagQuery, buildAffectedPagesPrompt, parseAffected
   const [affectedPages, setAffectedPages] = useState<WikiPage[]>([]);
   const [applyProgress, setApplyProgress] = useState('');
   const [applySummary, setApplySummary] = useState('');
+  const applyWsRef = useRef<WebSocket | null>(null);
+  const applyAbortedRef = useRef(false);
 ```
 
-Reset all of these to their initial values in the existing close-on-`isOpen`-false effect.
+Add a NEW unconditional reset effect — do NOT piggyback on the existing close
+effect, which is gated by `if (!isOpen && webSocketRef.current)` and therefore
+won't run when only an apply was in flight:
+
+```typescript
+  // Abort and reset any apply flow when the modal closes (component stays mounted).
+  useEffect(() => {
+    if (!isOpen) {
+      applyAbortedRef.current = true;
+      closeWebSocket(applyWsRef.current);
+      applyWsRef.current = null;
+      setApplyPhase('idle');
+      setApplyTarget(null);
+      setAffectedPages([]);
+      setApplyProgress('');
+      setApplySummary('');
+    }
+  }, [isOpen]);
+```
 
 - [ ] **Step 2: The apply pipeline**
 
@@ -438,11 +497,17 @@ Add inside the component:
     setApplyTarget(review);
     setApplyPhase('classifying');
     setApplySummary('');
+    applyAbortedRef.current = false;
     try {
-      const response = await runChatOnce({
-        ...wikiRequestBase(),
-        messages: [{ role: 'user', content: buildAffectedPagesPrompt(review.content, pages) }],
-      });
+      const response = await runChatOnce(
+        {
+          ...wikiRequestBase(),
+          messages: [{ role: 'user', content: buildAffectedPagesPrompt(review.content, pages) }],
+        },
+        600_000,
+        ws => { applyWsRef.current = ws; },
+      );
+      if (applyAbortedRef.current) return; // modal closed mid-flight
       const affected = parseAffectedPages(response, pages);
       if (affected.length === 0) {
         setApplyPhase('done');
@@ -452,6 +517,7 @@ Add inside the component:
       setAffectedPages(affected);
       setApplyPhase('confirm');
     } catch (err) {
+      if (applyAbortedRef.current) return;
       setApplyPhase('idle');
       setReviewError(`Could not determine affected pages: ${err instanceof Error ? err.message : err}`);
     }
@@ -464,14 +530,19 @@ Add inside the component:
     const updated: Record<string, WikiPage> = {};
     let revised = 0, unchanged = 0, failed = 0;
     for (let i = 0; i < affectedPages.length; i++) {
+      if (applyAbortedRef.current) return; // modal closed mid-apply — discard
       const page = affectedPages[i];
       setApplyProgress(`Revising ${page.title} (${i + 1}/${affectedPages.length})...`);
       try {
-        const response = await runChatOnce({
-          ...wikiRequestBase(),
-          messages: [{ role: 'user', content: buildApplyReviewPrompt(page, applyTarget.content, getRepoUrl(repoInfo)) }],
-          rag_query: buildPageRagQuery(page),
-        });
+        const response = await runChatOnce(
+          {
+            ...wikiRequestBase(),
+            messages: [{ role: 'user', content: buildApplyReviewPrompt(page, applyTarget.content, getRepoUrl(repoInfo)) }],
+            rag_query: buildPageRagQuery(page),
+          },
+          600_000,
+          ws => { applyWsRef.current = ws; },
+        );
         const { content, changed } = parseRevisedContent(page.content, response);
         if (changed) {
           updated[page.id] = { ...page, content };
@@ -480,17 +551,19 @@ Add inside the component:
           unchanged++;
         }
       } catch (err) {
+        if (applyAbortedRef.current) return;
         console.warn(`Apply-review failed for ${page.title}, keeping original:`, err);
         failed++;
       }
     }
+    if (applyAbortedRef.current) return;
     if (Object.keys(updated).length > 0) {
-      onPagesRevised?.(updated);
+      onPagesRevised?.(updated, { provider: reviewedProvider, model: reviewedModel });
     }
     setApplyPhase('done');
     setApplyProgress('');
     setApplySummary(`Revised ${revised} page(s), ${unchanged} unchanged, ${failed} failed.`);
-  }, [applyTarget, affectedPages, wikiRequestBase, repoInfo, onPagesRevised]);
+  }, [applyTarget, affectedPages, wikiRequestBase, repoInfo, onPagesRevised, reviewedProvider, reviewedModel]);
 ```
 
 - [ ] **Step 3: UI wiring in the modal body**
@@ -542,7 +615,14 @@ For the live review, construct the `WikiReview` object the same way `saveReview`
 ```typescript
   // Persist pages revised by applying a Model Review: merge into state and
   // save explicitly (the auto-save effect is gated off for cache-loaded wikis).
-  const handlePagesRevised = useCallback(async (updated: Record<string, WikiPage>) => {
+  const handlePagesRevised = useCallback(async (updated: Record<string, WikiPage>, target: { provider: string; model: string }) => {
+    // The apply runs for minutes; refuse if the user switched wiki versions
+    // meanwhile — merging model A's revisions into model B's pages would
+    // silently corrupt the other version's cache.
+    if (target.provider !== selectedProviderState || target.model !== selectedModelState) {
+      setError(`Review was applied to ${target.provider}/${target.model}, but ${selectedProviderState}/${selectedModelState} is now loaded — revisions were discarded. Reload that version and apply again.`);
+      return;
+    }
     const mergedPages = { ...generatedPages, ...updated };
     setGeneratedPages(mergedPages);
     if (!wikiStructure) return;
@@ -597,7 +677,7 @@ git commit -m "feat: apply Model Review findings back onto wiki pages with user 
 - [ ] **Step 1:** `PYTHONPATH=/home/ubuntu/deepwiki-open .venv/bin/python -m pytest tests/unit -v -k "wiki_cache or anthropic" && PYTHONPATH=/home/ubuntu/deepwiki-open .venv/bin/python -m pytest test -v` — all pass.
 - [ ] **Step 2:** Frontend build green (Docker; restore lockfiles).
 - [ ] **Step 3:** Rebuild the staging image and recreate `deepwiki-staging` (ports 3001/8002, `PUBLIC_API_PORT=8002`, `~/.adalflow` mount — same `docker run` as previous deploys). Manual checks:
-  1. Generate a wiki with self-review ON: log shows per-page "Reviewing {title}…" phases; backend log shows a second `/ws/chat` per page with `Using explicit rag_query for retrieval`; saved cache JSON contains `"self_reviewed": true`; "Generated by" line shows "· self-reviewed".
+  1. Generate a wiki with self-review ON: log shows per-page "Reviewing {title}…" phases; backend log shows a second `/ws/chat` per page with `Using explicit rag_query for retrieval`; saved cache JSON contains `"self_reviewed": true`; "Generated by" line shows "· self-reviewed". (Pages generate sequentially, so expect roughly double the wall-clock time as well as ~2× tokens — that is the toggle's trade-off.)
   2. Generate with the checkbox OFF: single pass per page, `self_reviewed: false`.
   3. Run a Model Review, click **Apply to wiki** → affected-pages confirmation appears → Apply → progress per page → summary; revised pages render immediately and persist across a hard reload (cache file mtime/`generated_at` updated).
   4. Apply button is disabled when viewing a review of a different model than the loaded wiki.

@@ -89,8 +89,19 @@ to the two cache models (optional, default None — old caches unaffected).
 
 ### Cost
 
-Self-review ≈ 2× first-generation tokens (hence the toggle). Apply-review = one small
-classification call + one generation-sized call per affected page.
+Self-review ≈ 2× first-generation tokens AND ≈ 2× wall-clock time (pages generate
+sequentially) — hence the toggle. Apply-review = one small classification call + one
+generation-sized call per affected page.
+
+### Safety invariants (from plan review)
+
+- The fence-unwrap in `parseRevisedContent` only strips an explicit whole-page
+  ```` ```markdown ```` wrapper pair — never a lone trailing fence, which would corrupt
+  pages ending in mermaid/code blocks and persist the damage as a "correction".
+- Apply-flow sockets are tracked and aborted when the modal closes; an aborted apply
+  never calls `onPagesRevised`.
+- `onPagesRevised` carries the target provider/model; `handlePagesRevised` refuses to
+  merge/save if the user switched wiki versions mid-apply.
 
 ### Testing
 
