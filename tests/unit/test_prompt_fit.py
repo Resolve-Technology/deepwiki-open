@@ -48,3 +48,12 @@ def test_fit_empty_file_content_untouched():
     )
     # No file content -> RAG is the only context; it gets tail-trimmed, not dropped.
     assert 0 < len(context_text) < 200_000
+
+
+def test_fit_exhausted_budget_returns_marker_only():
+    # budget barely above base_tokens -> allowed_chars clamps to 0;
+    # the [-0:] slice must not wrap around to the whole file.
+    file_content, context_text = fit_to_budget(
+        file_content="X" * 10_000, context_text="", base_tokens=27_999, budget=28_000,
+    )
+    assert file_content == "[file omitted: context budget exhausted]"

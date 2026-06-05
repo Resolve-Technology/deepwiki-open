@@ -68,11 +68,18 @@ def fit_to_budget(file_content: str, context_text: str, base_tokens: int, budget
         if allowed_chars < len(file_content):
             head = allowed_chars // 2
             tail = allowed_chars - head
-            log.warning(
-                "File content over budget: keeping first %d and last %d of %d chars",
-                head, tail, len(file_content),
-            )
-            file_content = file_content[:head] + TRUNCATION_MARKER + file_content[-tail:]
+            if allowed_chars == 0:
+                log.warning(
+                    "File content over budget and budget exhausted: omitting entire file (%d chars)",
+                    len(file_content),
+                )
+                file_content = "[file omitted: context budget exhausted]"
+            else:
+                log.warning(
+                    "File content over budget: keeping first %d and last %d of %d chars",
+                    head, tail, len(file_content),
+                )
+                file_content = file_content[:head] + TRUNCATION_MARKER + file_content[-tail:]
     elif context_text:
         allowed_chars = max((budget - base_tokens) * CHARS_PER_TOKEN, 0)
         if allowed_chars < len(context_text):
