@@ -613,7 +613,12 @@ async def read_wiki_cache(owner: str, repo: str, repo_type: str, language: str,
             try:
                 with open(cache_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    return WikiCacheData(**data)
+                    cached = WikiCacheData(**data)
+                    # Files written before tokens were stripped on save may still
+                    # carry one; never serve it back.
+                    if cached.repo and cached.repo.token:
+                        cached.repo.token = None
+                    return cached
             except Exception as e:
                 logger.error(f"Error reading wiki cache from {cache_path}: {e}")
                 continue
@@ -797,7 +802,12 @@ async def get_wiki_reviews(
     for review_path in glob.glob(pattern):
         try:
             with open(review_path, 'r', encoding='utf-8') as f:
-                reviews.append(WikiReviewData(**json.load(f)))
+                review = WikiReviewData(**json.load(f))
+                # Files written before tokens were stripped on save may still
+                # carry one; never serve it back.
+                if review.repo.token:
+                    review.repo.token = None
+                reviews.append(review)
         except Exception as e:
             logger.error(f"Error reading wiki review from {review_path}: {e}")
             continue

@@ -54,6 +54,7 @@ export default function WikiReviewModal({
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [pastReviews, setPastReviews] = useState<WikiReview[]>([]);
   const webSocketRef = useRef<WebSocket | null>(null);
+  const abortedRef = useRef(false);
 
   // Load past reviews whenever the modal opens
   useEffect(() => {
@@ -76,6 +77,7 @@ export default function WikiReviewModal({
   // Stop any in-flight review when the modal is closed (component stays mounted).
   useEffect(() => {
     if (!isOpen && webSocketRef.current) {
+      abortedRef.current = true; // suppress the save in the onClose handler
       closeWebSocket(webSocketRef.current);
       webSocketRef.current = null;
       setIsReviewing(false);
@@ -166,6 +168,7 @@ ${wikiText}
     setReviewError(null);
     setReviewContent('');
     setIsReviewing(true);
+    abortedRef.current = false;
 
     const request: ChatCompletionRequest = {
       repo_url: getRepoUrl(repoInfo),
@@ -191,6 +194,9 @@ ${wikiText}
       },
       () => {
         setIsReviewing(false);
+        if (abortedRef.current) {
+          return; // user closed the modal mid-stream — discard, don't save
+        }
         const finished = content.trim();
         if (finished && !finished.startsWith('Error:')) {
           saveReview(content, reviewerProvider, effectiveModel);

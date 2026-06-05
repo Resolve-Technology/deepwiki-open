@@ -347,3 +347,20 @@ def test_cache_save_strips_repo_token(cache_dir):
     data = asyncio.run(read_wiki_cache("owner", "repo", "github", "en",
                                        provider="claude", model="claude-sonnet-4-6"))
     assert data.repo.token is None
+
+
+def test_read_strips_token_from_legacy_files(cache_dir):
+    """Files written before the save-path strip may still carry tokens."""
+    req = make_cache_request("claude", "claude-sonnet-4-6")
+    payload = {
+        "wiki_structure": req.wiki_structure.model_dump(),
+        "generated_pages": {k: v.model_dump() for k, v in req.generated_pages.items()},
+        "repo": {"owner": "owner", "repo": "repo", "type": "github", "token": "ghp_secret"},
+        "provider": "claude",
+        "model": "claude-sonnet-4-6",
+    }
+    f = cache_dir / "deepwiki_cache_github_owner_repo_en~claude~claude-sonnet-4-6.json"
+    f.write_text(json.dumps(payload), encoding="utf-8")
+    data = asyncio.run(read_wiki_cache("owner", "repo", "github", "en",
+                                       provider="claude", model="claude-sonnet-4-6"))
+    assert data.repo.token is None
