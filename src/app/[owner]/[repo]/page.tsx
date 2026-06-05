@@ -779,6 +779,14 @@ A business-oriented requirements document inferred from the system's behavior:
 - Security Control (IAM, Log and Event Management, Encryption, Network, Database Security, Application Security, General Security)
 - Reference (Definition of Terminologies; Attachments)
 
+=== Top-level section 4: "🔬 Program Analysis" (per-program deep dive) ===
+EXACTLY ONE page per program source file in the repository (a program source file is any COBOL/RPG/source member — e.g. *.cbl, *.cob, *.rpg, or *.txt files whose content is program source). Rules for these pages:
+- The page id MUST follow the pattern "page-analysis-<program-name-lowercase>" (e.g. "page-analysis-bv401").
+- The page title MUST be "Program Deep Dive: <PROGRAM-NAME>".
+- relevant_files MUST contain EXACTLY the one source file for that program (plus its copybook files if they exist as separate files in the repository).
+- importance MUST be "high".
+- Do NOT create analysis pages for non-program files (READMEs, JCL listings, data files), and do NOT merge multiple programs into one page.
+
 Each top-level section should contain its own pages/subsections. The same underlying source files may be cited across all three documents — that is expected, since each presents the system from a different angle (developer wiki / technical spec / business requirements).
 
 Return your analysis in the following XML format:
@@ -850,7 +858,7 @@ IMPORTANT FORMATTING INSTRUCTIONS:
 - Start directly with <wiki_structure> and end with </wiki_structure>
 
 IMPORTANT:
-1. Create ${isComprehensiveView ? '18-30 pages total spread across the three top-level documents (Wiki, TSD, BRD), each document having a meaningful set of pages' : '4-6 pages'} that would make a ${isComprehensiveView ? 'comprehensive' : 'concise'} wiki for this repository
+1. Create ${isComprehensiveView ? '18-30 pages total spread across the Wiki, TSD and BRD documents, PLUS exactly one "🔬 Program Analysis" page per program source file (these do not count toward the 18-30)' : '4-6 pages'} that would make a ${isComprehensiveView ? 'comprehensive' : 'concise'} wiki for this repository
 2. Each page should focus on a specific aspect of the codebase (e.g., architecture, key features, setup)
 3. The relevant_files should be actual files from the repository that would be used to generate that page
 4. Return ONLY valid XML with the structure specified above, with no markdown code block delimiters`
