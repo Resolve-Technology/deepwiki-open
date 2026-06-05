@@ -478,7 +478,12 @@ def list_wiki_cache_paths(owner: str, repo: str, repo_type: str, language: str) 
     paths = glob.glob(f"{base}~*~*.json")
     if os.path.exists(legacy_path):
         paths.append(legacy_path)
-    paths.sort(key=os.path.getmtime, reverse=True)
+    def _mtime(p: str) -> float:
+        try:
+            return os.path.getmtime(p)
+        except OSError:
+            return 0.0
+    paths.sort(key=_mtime, reverse=True)
     return paths
 
 def parse_wiki_cache_filename(filename: str) -> Optional[Dict[str, Optional[str]]]:
@@ -507,22 +512,34 @@ def parse_wiki_cache_filename(filename: str) -> Optional[Dict[str, Optional[str]
         "model": model,
     }
 
-async def read_wiki_cache(owner: str, repo: str, repo_type: str, language: str) -> Optional[WikiCacheData]:
-    """Reads wiki cache data from the file system."""
-    cache_path = get_wiki_cache_path(owner, repo, repo_type, language)
-    if os.path.exists(cache_path):
-        try:
-            with open(cache_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                return WikiCacheData(**data)
-        except Exception as e:
-            logger.error(f"Error reading wiki cache from {cache_path}: {e}")
-            return None
+async def read_wiki_cache(owner: str, repo: str, repo_type: str, language: str,
+                          provider: Optional[str] = None,
+                          model: Optional[str] = None) -> Optional[WikiCacheData]:
+    """Reads wiki cache data from the file system.
+
+    With provider+model: reads that exact version (None on miss).
+    Without: returns the newest cached version for the repo, skipping
+    unparseable files.
+    """
+    if sanitize_version_segment(provider) and sanitize_version_segment(model):
+        candidates = [get_wiki_cache_path(owner, repo, repo_type, language, provider, model)]
+    else:
+        candidates = list_wiki_cache_paths(owner, repo, repo_type, language)
+    for cache_path in candidates:
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    return WikiCacheData(**data)
+            except Exception as e:
+                logger.error(f"Error reading wiki cache from {cache_path}: {e}")
+                continue
     return None
 
 async def save_wiki_cache(data: WikiCacheRequest) -> bool:
     """Saves wiki cache data to the file system."""
-    cache_path = get_wiki_cache_path(data.repo.owner, data.repo.repo, data.repo.type, data.language)
+    cache_path = get_wiki_cache_path(data.repo.owner, data.repo.repo, data.repo.type,
+                                     data.language, data.provider, data.model)
     logger.info(f"Attempting to save wiki cache. Path: {cache_path}")
     try:
         payload = WikiCacheData(
