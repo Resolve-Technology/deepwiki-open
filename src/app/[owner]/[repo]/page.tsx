@@ -555,7 +555,7 @@ For EVERY file in SELECT/ASSIGN and FD entries: logical name, physical file/memb
 Every COPY member and inline record layout: where used, full field table (level, field name, PIC, computed byte length, description inferred from usage). Do not skip filler fields.
 
 ## 4. Working-Storage Inventory (EXHAUSTIVE)
-EVERY 01/77-level item and its subordinate fields — no exceptions, including counters, flags, constants, timestamps and work areas. Table columns: field, PIC, length, initial value, purpose, and the paragraphs that read or write it. Group logically (constants / flags / counters / timestamps / record areas / work fields).
+EVERY 01/77-level item and its subordinate fields — no exceptions. That includes the "boring" ones: plain CALL-linkage buffer areas (e.g. \`01 LSAA-XXX PIC X(1024).\`), status/return-code fields, copybook-shaped record buffers, counters, flags, constants, timestamps and work areas, plus any LINKAGE SECTION items. Table columns: field, PIC, length, initial value, purpose, and the paragraphs that read or write it. Group logically (constants / flags / counters / timestamps / record & linkage buffers / work fields). A reviewer will mechanically grep the source for every 01/77 level and fail this page if even one name is absent.
 
 ## 5. Procedure Division — Complete Paragraph Inventory
 First a table of EVERY paragraph/SECTION in source order: name, one-line purpose, performed-by (callers), performs (callees), files touched.
