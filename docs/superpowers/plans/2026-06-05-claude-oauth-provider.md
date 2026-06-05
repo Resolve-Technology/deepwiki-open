@@ -585,8 +585,8 @@ git status   # only .env (untracked changes to live config) and the two pre-exis
 
 ## Spike results (fill in during Task 1)
 
-- Base URL used: _
-- `anthropic-beta: oauth-2025-04-20` header required: yes / no
-- Streaming `stream_options.include_usage` supported: yes / no  (if **no** → the `convert_inputs_to_api_kwargs` override in Task 3 is REQUIRED)
-- Confirmed model IDs: _
-- Notes: _
+- Base URL used: `https://api.anthropic.com/v1` (direct — reachable from this host, no relay needed)
+- `anthropic-beta: oauth-2025-04-20` header required: **no** (200 with and without; keep sending it — harmless and future-proofs against enforcement)
+- Streaming `stream_options.include_usage` supported: **yes** — usage arrives on the final content chunk (which has `choices` + `finish_reason: "stop"`), not a separate empty-choices chunk; the inherited capture logic handles both shapes. Task 3 override NOT required.
+- Confirmed model IDs (via `/v1/models`): `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001` — all three plan IDs valid.
+- Notes (2026-06-05): non-streaming responses include `usage` too. `claude-sonnet-4-6` returned consistent HTTP 429 `rate_limit_error` during the spike while `claude-haiku-4-5-20251001` worked — looks like a subscription usage-window cap on that tier, not an integration problem; use haiku for Task 6 verification if sonnet still 429s. `/v1/models` requires `anthropic-version: 2023-06-01` header (chat/completions does not).
