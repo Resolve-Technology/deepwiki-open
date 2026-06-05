@@ -78,6 +78,17 @@ def test_sync_client_gets_token_and_beta_header(monkeypatch, captured_openai):
     assert captured_openai["base_url"] == "https://api.anthropic.com/v1"
 
 
+def test_async_client_gets_token_and_beta_header(monkeypatch, captured_openai):
+    monkeypatch.delenv("CLAUDE_API_BASE_URL", raising=False)
+    monkeypatch.setenv("CLAUDE_OAUTH_TOKEN", "sk-ant-oat01-test")
+    client = ClaudeClient()
+    captured_openai.clear()  # discard kwargs captured by the eager sync init
+    client.init_async_client()
+    assert captured_openai["api_key"] == "sk-ant-oat01-test"
+    assert captured_openai["default_headers"]["anthropic-beta"] == "oauth-2025-04-20"
+    assert captured_openai["base_url"] == "https://api.anthropic.com/v1"
+
+
 def test_missing_token_raises(monkeypatch):
     monkeypatch.delenv("CLAUDE_OAUTH_TOKEN", raising=False)
     monkeypatch.delenv("CLAUDE_API_BASE_URL", raising=False)
