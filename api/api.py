@@ -179,6 +179,7 @@ class AuthorizationConfig(BaseModel):
     code: str = Field(..., description="Authorization code")
 
 from api.config import configs, WIKI_AUTH_MODE, WIKI_AUTH_CODE
+from api.repo_tree import read_local_repo_structure
 from api.vllm_discovery import get_vllm_models
 
 @app.get("/lang/config")
@@ -350,32 +351,9 @@ async def get_local_repo_structure(path: str = Query(None, description="Path to 
             content={"error": "Directory not found."}
         )
 
-    MAX_README_BYTES = 1_000_000
     try:
         logger.info(f"Processing local repository at: {real_path}")
-        file_tree_lines = []
-        readme_content = ""
-
-        # followlinks=False prevents symlinks from escaping the tree.
-        for root, dirs, files in os.walk(real_path, followlinks=False):
-            # Exclude hidden dirs/files and virtual envs
-            dirs[:] = [d for d in dirs if not d.startswith('.') and d != '__pycache__' and d != 'node_modules' and d != '.venv']
-            for file in files:
-                if file.startswith('.') or file == '__init__.py' or file == '.DS_Store':
-                    continue
-                rel_dir = os.path.relpath(root, real_path)
-                rel_file = os.path.join(rel_dir, file) if rel_dir != '.' else file
-                file_tree_lines.append(rel_file)
-                # Find README.md (case-insensitive)
-                if file.lower() == 'readme.md' and not readme_content:
-                    try:
-                        with open(os.path.join(root, file), 'r', encoding='utf-8') as f:
-                            readme_content = f.read(MAX_README_BYTES)
-                    except Exception as e:
-                        logger.warning(f"Could not read README.md: {str(e)}")
-                        readme_content = ""
-
-        file_tree_str = '\n'.join(sorted(file_tree_lines))
+        file_tree_str, readme_content = read_local_repo_structure(real_path)
         return {"file_tree": file_tree_str, "readme": readme_content}
     except Exception as e:
         logger.error(f"Error processing local repository: {str(e)}", exc_info=True)
