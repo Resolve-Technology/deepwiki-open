@@ -7,6 +7,7 @@ import { FaWikipediaW, FaGithub, FaCoffee, FaTwitter } from 'react-icons/fa';
 import ThemeToggle from '@/components/theme-toggle';
 import Mermaid from '../components/Mermaid';
 import ConfigurationModal from '@/components/ConfigurationModal';
+import JobsPanel from '@/components/JobsPanel';
 import ProcessedProjects from '@/components/ProcessedProjects';
 import { extractUrlPath, extractUrlDomain } from '@/utils/urlDecoder';
 import { useProcessedProjects } from '@/hooks/useProcessedProjects';
@@ -557,6 +558,9 @@ export default function Home() {
       <main className="flex-1 max-w-6xl mx-auto w-full overflow-y-auto">
         <div
           className="min-h-full flex flex-col items-center p-8 pt-10 bg-[var(--card-bg)] rounded-lg shadow-custom card-japanese">
+
+          {/* Queued/running server-side generations (hidden when there are none) */}
+          <JobsPanel authCode={authCode} className="w-full mb-6" />
 
           {/* Conditionally show processed projects or welcome content */}
           {!projectsLoading && projects.length > 0 ? (
