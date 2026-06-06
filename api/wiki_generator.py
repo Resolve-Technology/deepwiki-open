@@ -256,12 +256,16 @@ async def run_generation(
     system_prompt = select_generation_system_prompt(
         repo.type, repo_url, repo_name, job.language)
 
-    # 4. Structure call — retry loop ported from determineWikiStructure
+    # 4. Structure call — retry loop ported from determineWikiStructure.
+    # Unlike the browser's lenient DOMParser, ElementTree is strict, so a
+    # response that parses badly also consumes an attempt (fresh dispatch).
     structure_inner = build_structure_prompt(
         file_tree, readme, repo.owner, repo.repo, job.language, job.comprehensive)
     structure_prompt = assemble_envelope(system_prompt, structure_inner,
                                          provider=job.provider)
-    xml_match: Optional[str] = None
+    structure: Optional[Dict[str, Any]] = None
+    last_parse_error: Optional[GenerationError] = None
+    saw_xml = False
     for attempt in range(1, MAX_STRUCTURE_ATTEMPTS + 1):
         response_text = await timed_dispatch(structure_prompt, stats_generation)
         notify()
@@ -269,18 +273,29 @@ async def run_generation(
         response_text = re.sub(r"^```(?:xml)?\s*", "", response_text, flags=re.IGNORECASE)
         response_text = re.sub(r"```\s*$", "", response_text, flags=re.IGNORECASE)
         match = re.search(r"<wiki_structure>[\s\S]*?</wiki_structure>", response_text)
-        if match:
-            xml_match = match.group(0)
+        if not match:
+            logger.warning(
+                f"Wiki structure attempt {attempt}/{MAX_STRUCTURE_ATTEMPTS}: no valid XML "
+                f"in response (received {len(response_text)} chars; has opening tag: "
+                f"{'<wiki_structure>' in response_text})")
+            continue
+        saw_xml = True
+        xml_text = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", match.group(0))
+        # Escape bare ampersands (LLMs emit "A & B" freely; browsers' DOMParser
+        # shrugged it off, ElementTree refuses) — lossless for valid XML.
+        xml_text = re.sub(r"&(?!#?[A-Za-z0-9]+;)", "&amp;", xml_text)
+        try:
+            structure = parse_structure_xml(xml_text, job.comprehensive)
             break
-        logger.warning(
-            f"Wiki structure attempt {attempt}/{MAX_STRUCTURE_ATTEMPTS}: no valid XML "
-            f"in response (received {len(response_text)} chars; has opening tag: "
-            f"{'<wiki_structure>' in response_text})")
-    if not xml_match:
+        except GenerationError as e:
+            last_parse_error = e
+            logger.warning(
+                f"Wiki structure attempt {attempt}/{MAX_STRUCTURE_ATTEMPTS}: "
+                f"XML matched but did not parse: {e}")
+    if structure is None:
+        if saw_xml and last_parse_error is not None:
+            raise last_parse_error
         raise GenerationError("No valid XML found in response")
-
-    xml_text = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", xml_match)
-    structure = parse_structure_xml(xml_text, job.comprehensive)
     pages = structure["pages"]
 
     # 5. Per-page generation (sequential, like the frontend's MAX_CONCURRENT=1)

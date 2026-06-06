@@ -327,6 +327,29 @@ def test_structure_unparseable_xml_fails():
     dispatch = FakeDispatch([truncated] * 3)
     with pytest.raises(GenerationError, match="Failed to parse"):
         run(run_generation(job, dispatch))
+    assert len(dispatch.prompts) == 3  # a bad parse consumes an attempt
+
+
+def test_structure_bad_parse_then_good_response_recovers(tmp_path):
+    job = make_job(self_review=False)
+    truncated = "<wiki_structure><title>T</title><pages><page></wiki_structure>"
+    dispatch = FakeDispatch([truncated, STRUCTURE_XML] + [PAGE_BODY] * 3)
+    run(run_generation(job, dispatch))
+    assert len(read_cache(tmp_path, job)["generated_pages"]) == 3
+
+
+def test_structure_bare_ampersands_are_tolerated(tmp_path):
+    # Browsers' DOMParser tolerated "Setup & Config"; ElementTree must too
+    xml = """<wiki_structure><title>Wiki for A & B</title><description>D</description><pages>
+      <page id="p1"><title>Setup & Configuration</title>
+        <relevant_files><file_path>a.py</file_path></relevant_files></page>
+    </pages></wiki_structure>"""
+    job = make_job(self_review=False)
+    dispatch = FakeDispatch([xml, PAGE_BODY])
+    run(run_generation(job, dispatch))
+    data = read_cache(tmp_path, job)
+    assert data["wiki_structure"]["title"] == "Wiki for A & B"
+    assert data["generated_pages"]["p1"]["title"] == "Setup & Configuration"
 
 
 def test_duplicate_page_ids_get_dup_suffix():
