@@ -10,9 +10,6 @@ import WikiTreeView from '@/components/WikiTreeView';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { RepoInfo } from '@/types/repoinfo';
 import getRepoUrl from '@/utils/getRepoUrl';
-import { getWebSocketUrl, ChatCompletionRequest } from '@/utils/websocketClient';
-import { runChatOnce, buildPageRagQuery, buildSelfReviewPrompt, parseRevisedContent, extractUsageMarker } from '@/utils/wikiRevision';
-import { extractUrlDomain, extractUrlPath } from '@/utils/urlDecoder';
 import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -46,6 +43,26 @@ interface WikiStructure {
   sections: WikiSection[];
   rootSections: string[];
 }
+
+// Server-side generation job, as returned by /api/wiki_jobs
+interface WikiJobStatus {
+  id: string;
+  repo: { owner: string; repo: string; type: string; repoUrl?: string | null; localPath?: string | null };
+  language: string;
+  provider: string;
+  model: string;
+  comprehensive: boolean;
+  self_review: boolean;
+  status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'interrupted';
+  progress: { phase: string; pages_total: number; pages_done: number; current_page_title: string };
+  stats?: Record<string, unknown>;
+  error?: string | null;
+  created_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+const JOB_ACTIVE_STATUSES = ['queued', 'running'];
 
 // Add CSS styles for wiki with Japanese aesthetic
 const wikiStyles = `
@@ -94,88 +111,6 @@ const wikiStyles = `
 const getCacheKey = (owner: string, repo: string, repoType: string, language: string, isComprehensive: boolean = true): string => {
   return `deepwiki_cache_${repoType}_${owner}_${repo}_${language}_${isComprehensive ? 'comprehensive' : 'concise'}`;
 };
-
-// Helper function to add tokens and other parameters to request body
-const addTokensToRequestBody = (
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  requestBody: Record<string, any>,
-  token: string,
-  repoType: string,
-  provider: string = '',
-  model: string = '',
-  isCustomModel: boolean = false,
-  customModel: string = '',
-  language: string = 'en',
-  excludedDirs?: string,
-  excludedFiles?: string,
-  includedDirs?: string,
-  includedFiles?: string
-): void => {
-  if (token !== '') {
-    requestBody.token = token;
-  }
-
-  // Add provider-based model selection parameters
-  requestBody.provider = provider;
-  requestBody.model = model;
-  if (isCustomModel && customModel) {
-    requestBody.custom_model = customModel;
-  }
-
-  requestBody.language = language;
-
-  // Add file filter parameters if provided
-  if (excludedDirs) {
-    requestBody.excluded_dirs = excludedDirs;
-  }
-  if (excludedFiles) {
-    requestBody.excluded_files = excludedFiles;
-  }
-  if (includedDirs) {
-    requestBody.included_dirs = includedDirs;
-  }
-  if (includedFiles) {
-    requestBody.included_files = includedFiles;
-  }
-
-};
-
-const createGithubHeaders = (githubToken: string): HeadersInit => {
-  const headers: HeadersInit = {
-    'Accept': 'application/vnd.github.v3+json'
-  };
-
-  if (githubToken) {
-    headers['Authorization'] = `Bearer ${githubToken}`;
-  }
-
-  return headers;
-};
-
-const createGitlabHeaders = (gitlabToken: string): HeadersInit => {
-  const headers: HeadersInit = {
-    'Content-Type': 'application/json',
-  };
-
-  if (gitlabToken) {
-    headers['PRIVATE-TOKEN'] = gitlabToken;
-  }
-
-  return headers;
-};
-
-const createBitbucketHeaders = (bitbucketToken: string): HeadersInit => {
-  const headers: HeadersInit = {
-    'Content-Type': 'application/json',
-  };
-
-  if (bitbucketToken) {
-    headers['Authorization'] = `Bearer ${bitbucketToken}`;
-  }
-
-  return headers;
-};
-
 
 export default function RepoWikiPage() {
   // Get route parameters and search params
@@ -234,14 +169,18 @@ export default function RepoWikiPage() {
   const [wikiStructure, setWikiStructure] = useState<WikiStructure | undefined>();
   const [currentPageId, setCurrentPageId] = useState<string | undefined>();
   const [generatedPages, setGeneratedPages] = useState<Record<string, WikiPage>>({});
-  const [pagesInProgress, setPagesInProgress] = useState(new Set<string>());
   const [isExporting, setIsExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
-  const [originalMarkdown, setOriginalMarkdown] = useState<Record<string, string>>({});
-  const [requestInProgress, setRequestInProgress] = useState(false);
   const [currentToken, setCurrentToken] = useState(token); // Track current effective token
   const [effectiveRepoInfo, setEffectiveRepoInfo] = useState(repoInfo); // Track effective repo info with cached data
   const [embeddingError, setEmbeddingError] = useState(false);
+
+  // Server-side generation job this page is watching (if any)
+  const [activeJob, setActiveJob] = useState<WikiJobStatus | null>(null);
+  // Cache miss with no running job: show the "Generate this wiki" panel
+  // instead of auto-generating (a bare page visit must never spend tokens).
+  const [cacheMiss, setCacheMiss] = useState(false);
+  const lastPagesDoneRef = useRef(0);
 
   // Model selection state variables
   const [selectedProviderState, setSelectedProviderState] = useState(providerParam);
@@ -266,22 +205,6 @@ export default function RepoWikiPage() {
   const isSelfReviewParam = searchParams.get('self_review') !== 'false';
   const [isComprehensiveView, setIsComprehensiveView] = useState(isComprehensiveParam);
   const [isSelfReviewEnabled, setIsSelfReviewEnabled] = useState(isSelfReviewParam);
-  // Using useRef for activeContentRequests to maintain a single instance across renders
-  // This map tracks which pages are currently being processed to prevent duplicate requests
-  // Note: In a multi-threaded environment, additional synchronization would be needed,
-  // but in React's single-threaded model, this is safe as long as we set the flag before any async operations
-  const activeContentRequests = useRef(new Map<string, boolean>()).current;
-  const [structureRequestInProgress, setStructureRequestInProgress] = useState(false);
-  // Create a flag to track if data was loaded from cache to prevent immediate re-save
-  const cacheLoadedSuccessfully = useRef(false);
-
-  // Per-phase token/time accounting for the current generation run. Tokens
-  // come from the backend's opt-in usage trailer (claude provider); time is
-  // measured here. Saved into the cache as `stats` and shown on the home page.
-  const runStatsRef = useRef({
-    generation: { input_tokens: 0, output_tokens: 0, ms: 0 },
-    review: { input_tokens: 0, output_tokens: 0, ms: 0 },
-  });
 
   // Create a flag to ensure the effect only runs once
   const effectRan = React.useRef(false);
@@ -294,45 +217,6 @@ export default function RepoWikiPage() {
   const [authRequired, setAuthRequired] = useState<boolean>(false);
   const [authCode, setAuthCode] = useState<string>('');
   const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
-
-  // Default branch state
-  const [defaultBranch, setDefaultBranch] = useState<string>('main');
-
-  // Helper function to generate proper repository file URLs
-  const generateFileUrl = useCallback((filePath: string): string => {
-    if (effectiveRepoInfo.type === 'local') {
-      // For local repositories, we can't generate web URLs
-      return filePath;
-    }
-
-    const repoUrl = effectiveRepoInfo.repoUrl;
-    if (!repoUrl) {
-      return filePath;
-    }
-
-    try {
-      const url = new URL(repoUrl);
-      const hostname = url.hostname;
-      
-      if (hostname === 'github.com' || hostname.includes('github')) {
-        // GitHub URL format: https://github.com/owner/repo/blob/branch/path
-        return `${repoUrl}/blob/${defaultBranch}/${filePath}`;
-      } else if (hostname === 'gitlab.com' || hostname.includes('gitlab')) {
-        // GitLab URL format: https://gitlab.com/owner/repo/-/blob/branch/path
-        return `${repoUrl}/-/blob/${defaultBranch}/${filePath}`;
-      } else if (hostname === 'bitbucket.org' || hostname.includes('bitbucket')) {
-        // Bitbucket URL format: https://bitbucket.org/owner/repo/src/branch/path
-        return `${repoUrl}/src/${defaultBranch}/${filePath}`;
-      }
-    } catch (error) {
-      console.warn('Error generating file URL:', error);
-    }
-
-    // Fallback to just the file path
-    return filePath;
-  }, [effectiveRepoInfo, defaultBranch]);
-
-  // Memoize repo info to avoid triggering updates in callbacks
 
   // Add useEffect to handle scroll reset
   useEffect(() => {
@@ -384,1381 +268,324 @@ export default function RepoWikiPage() {
     fetchAuthStatus();
   }, []);
 
-  // Generate content for a wiki page
-  const generatePageContent = useCallback(async (page: WikiPage, owner: string, repo: string) => {
-    return new Promise<void>(async (resolve) => {
-      try {
-        // Skip if content already exists
-        if (generatedPages[page.id]?.content) {
-          resolve();
-          return;
-        }
-
-        // Skip if this page is already being processed
-        // Use a synchronized pattern to avoid race conditions
-        if (activeContentRequests.get(page.id)) {
-          console.log(`Page ${page.id} (${page.title}) is already being processed, skipping duplicate call`);
-          resolve();
-          return;
-        }
-
-        // Mark this page as being processed immediately to prevent race conditions
-        // This ensures that if multiple calls happen nearly simultaneously, only one proceeds
-        activeContentRequests.set(page.id, true);
-
-        // Validate repo info
-        if (!owner || !repo) {
-          throw new Error('Invalid repository information. Owner and repo name are required.');
-        }
-
-        // Mark page as in progress
-        setPagesInProgress(prev => new Set(prev).add(page.id));
-        // Don't set loading message for individual pages during queue processing
-
-        const filePaths = page.filePaths;
-
-        // Store the initially generated content BEFORE rendering/potential modification
-        setGeneratedPages(prev => ({
-          ...prev,
-          [page.id]: { ...page, content: 'Loading...' } // Placeholder
-        }));
-        setOriginalMarkdown(prev => ({ ...prev, [page.id]: '' })); // Clear previous original
-
-        // Make API call to generate page content
-        console.log(`Starting content generation for page: ${page.title}`);
-
-        // Get repository URL
-        const repoUrl = getRepoUrl(effectiveRepoInfo);
-
-        // Create the prompt content - simplified to avoid message dialogs
-        const isDeepDive = page.id.startsWith('page-analysis-');
-        const standardPrompt =
-`You are an expert technical writer and software architect.
-Your task is to generate a comprehensive and accurate technical wiki page in Markdown format about a specific feature, system, or module within a given software project.
-Write in a formal, precise, structured technical-documentation style appropriate to the page's role within its document (a developer Wiki, a Technical Specification Document, or a Business and Functional Requirement document). Where the page documents data structures (copybooks/record layouts, physical/logical files), present them as field tables (field name, type/PIC, length, description); where it documents a program, summarize its business function, inputs/outputs, called modules, and key logic; where it documents a business or functional requirement, state it as numbered BR#/FR# items.
-
-You will be given:
-1. The "[WIKI_PAGE_TOPIC]" for the page you need to create.
-2. A list of "[RELEVANT_SOURCE_FILES]" from the project that you MUST use as the sole basis for the content. You have access to the full content of these files. You MUST use AT LEAST 5 relevant source files for comprehensive coverage - if fewer are provided, search for additional related files in the codebase.
-
-CRITICAL STARTING INSTRUCTION:
-The very first thing on the page MUST be a \`<details>\` block listing ALL the \`[RELEVANT_SOURCE_FILES]\` you used to generate the content. There MUST be AT LEAST 5 source files listed - if fewer were provided, you MUST find additional related files to include.
-Format it exactly like this:
-<details>
-<summary>Relevant source files</summary>
-
-Remember, do not provide any acknowledgements, disclaimers, apologies, or any other preface before the \`<details>\` block. JUST START with the \`<details>\` block.
-The following files were used as context for generating this wiki page:
-
-${filePaths.map(path => `- [${path}](${generateFileUrl(path)})`).join('\n')}
-<!-- Add additional relevant files if fewer than 5 were provided -->
-</details>
-
-Immediately after the \`<details>\` block, the main title of the page should be a H1 Markdown heading: \`# ${page.title}\`.
-
-Based ONLY on the content of the \`[RELEVANT_SOURCE_FILES]\`:
-
-1.  **Introduction:** Start with a concise introduction (1-2 paragraphs) explaining the purpose, scope, and high-level overview of "${page.title}" within the context of the overall project. If relevant, and if information is available in the provided files, link to other potential wiki pages using the format \`[Link Text](#page-anchor-or-id)\`.
-
-2.  **Detailed Sections:** Break down "${page.title}" into logical sections using H2 (\`##\`) and H3 (\`###\`) Markdown headings. For each section:
-    *   Explain the architecture, components, data flow, or logic relevant to the section's focus, as evidenced in the source files.
-    *   Identify key functions, classes, data structures, API endpoints, or configuration elements pertinent to that section.
-
-3.  **Mermaid Diagrams:**
-    *   EXTENSIVELY use Mermaid diagrams (e.g., \`flowchart TD\`, \`sequenceDiagram\`, \`classDiagram\`, \`erDiagram\`, \`graph TD\`) to visually represent architectures, flows, relationships, and schemas found in the source files.
-    *   Ensure diagrams are accurate and directly derived from information in the \`[RELEVANT_SOURCE_FILES]\`.
-    *   Provide a brief explanation before or after each diagram to give context.
-    *   CRITICAL: All diagrams MUST follow strict vertical orientation:
-       - Use "graph TD" (top-down) directive for flow diagrams
-       - NEVER use "graph LR" (left-right)
-       - Maximum node width should be 3-4 words
-       - For sequence diagrams:
-         - Start with "sequenceDiagram" directive on its own line
-         - Define ALL participants at the beginning using "participant" keyword
-         - Optionally specify participant types: actor, boundary, control, entity, database, collections, queue
-         - Use descriptive but concise participant names, or use aliases: "participant A as Alice"
-         - Use the correct Mermaid arrow syntax (8 types available):
-           - -> solid line without arrow (rarely used)
-           - --> dotted line without arrow (rarely used)
-           - ->> solid line with arrowhead (most common for requests/calls)
-           - -->> dotted line with arrowhead (most common for responses/returns)
-           - ->x solid line with X at end (failed/error message)
-           - -->x dotted line with X at end (failed/error response)
-           - -) solid line with open arrow (async message, fire-and-forget)
-           - --) dotted line with open arrow (async response)
-           - Examples: A->>B: Request, B-->>A: Response, A->xB: Error, A-)B: Async event
-         - Use +/- suffix for activation boxes: A->>+B: Start (activates B), B-->>-A: End (deactivates B)
-         - Group related participants using "box": box GroupName ... end
-         - Use structural elements for complex flows:
-           - loop LoopText ... end (for iterations)
-           - alt ConditionText ... else ... end (for conditionals)
-           - opt OptionalText ... end (for optional flows)
-           - par ParallelText ... and ... end (for parallel actions)
-           - critical CriticalText ... option ... end (for critical regions)
-           - break BreakText ... end (for breaking flows/exceptions)
-         - Add notes for clarification: "Note over A,B: Description", "Note right of A: Detail"
-         - Use autonumber directive to add sequence numbers to messages
-         - NEVER use flowchart-style labels like A--|label|-->B. Always use a colon for labels: A->>B: My Label
-
-4.  **Tables:**
-    *   Use Markdown tables to summarize information such as:
-        *   Key features or components and their descriptions.
-        *   API endpoint parameters, types, and descriptions.
-        *   Configuration options, their types, and default values.
-        *   Data model fields, types, constraints, and descriptions.
-        *   COBOL copybook / record-layout fields (field name, PIC/type, length, description).
-        *   Program inventory entries (program name, business function, key modifications/logic).
-
-5.  **Code Snippets (ENTIRELY OPTIONAL):**
-    *   Include short, relevant code snippets (e.g., Python, Java, JavaScript, SQL, JSON, YAML) directly from the \`[RELEVANT_SOURCE_FILES]\` to illustrate key implementation details, data structures, or configurations.
-    *   Ensure snippets are well-formatted within Markdown code blocks with appropriate language identifiers.
-
-6.  **Source Citations (EXTREMELY IMPORTANT):**
-    *   For EVERY piece of significant information, explanation, diagram, table entry, or code snippet, you MUST cite the specific source file(s) and relevant line numbers from which the information was derived.
-    *   Place citations at the end of the paragraph, under the diagram/table, or after the code snippet.
-    *   Use the exact format: \`Sources: [filename.ext:start_line-end_line]()\` for a range, or \`Sources: [filename.ext:line_number]()\` for a single line. Multiple files can be cited: \`Sources: [file1.ext:1-10](), [file2.ext:5](), [dir/file3.ext]()\` (if the whole file is relevant and line numbers are not applicable or too broad).
-    *   If an entire section is overwhelmingly based on one or two files, you can cite them under the section heading in addition to more specific citations within the section.
-    *   IMPORTANT: You MUST cite AT LEAST 5 different source files throughout the wiki page to ensure comprehensive coverage.
-
-7.  **Technical Accuracy:** All information must be derived SOLELY from the \`[RELEVANT_SOURCE_FILES]\`. Do not infer, invent, or use external knowledge about similar systems or common practices unless it's directly supported by the provided code. If information is not present in the provided files, do not include it or explicitly state its absence if crucial to the topic.
-
-8.  **Clarity and Conciseness:** Use clear, professional, and concise technical language suitable for other developers working on or learning about the project. Avoid unnecessary jargon, but use correct technical terms where appropriate.
-
-9.  **Conclusion/Summary:** End with a brief summary paragraph if appropriate for "${page.title}", reiterating the key aspects covered and their significance within the project.
-
-IMPORTANT: Generate the content in ${language === 'en' ? 'English' :
-            language === 'ja' ? 'Japanese (日本語)' :
-            language === 'zh' ? 'Mandarin Chinese (中文)' :
-            language === 'zh-tw' ? 'Traditional Chinese (繁體中文)' :
-            language === 'es' ? 'Spanish (Español)' :
-            language === 'kr' ? 'Korean (한국어)' :
-            language === 'vi' ? 'Vietnamese (Tiếng Việt)' : 
-            language === "pt-br" ? "Brazilian Portuguese (Português Brasileiro)" :
-            language === "fr" ? "Français (French)" :
-            language === "ru" ? "Русский (Russian)" :
-            'English'} language.
-
-Remember:
-- Ground every claim in the provided source files.
-- Prioritize accuracy and direct representation of the code's functionality and structure.
-- Structure the document logically for easy understanding by other developers.
-`;
-
-        const deepDivePrompt =
-`You are a senior mainframe/COBOL systems analyst producing the definitive reference analysis of one program.
-You are given the COMPLETE source of the program in [CURRENT_FILE_CONTENT]. Base EVERY statement strictly on that source (plus any copybook files provided). Never invent fields, paragraphs, or behavior. Cite line numbers for every claim using the format [${page.filePaths[0] ?? 'source'}:start-end]().
-
-CRITICAL STARTING INSTRUCTION:
-The very first thing on the page MUST be a \`<details>\` block listing the source file(s) analyzed:
-<details>
-<summary>Relevant source files</summary>
-
-${filePaths.map(path => `- [${path}](${generateFileUrl(path)})`).join('\n')}
-</details>
-
-Immediately after, the H1 title: \`# ${page.title}\`
-
-Then produce ALL of the following numbered sections (every one is REQUIRED; if a section is genuinely not applicable to this program, keep the heading and state in one line why it does not apply):
-
-## 1. Program Identification
-Table: program name, platform (infer from source style, e.g. IBM AS/400), version/date stamps found in source, change/work-unit references found in comments, one-paragraph business purpose.
-
-## 2. Environment & File Definitions
-For EVERY file in SELECT/ASSIGN and FD entries: logical name, physical file/member, record format name, organization, access mode, key fields, open mode used (INPUT/OUTPUT/I-O/EXTEND), and its role (primary input / primary output / update-in-place / control / reference lookup). Group into Input / Output-Update / Reference tables.
-
-## 3. Copybooks & Record Layouts
-Every COPY member and inline record layout: where used, full field table (level, field name, PIC, computed byte length, description inferred from usage). Do not skip filler fields.
-
-## 4. Working-Storage Inventory (EXHAUSTIVE)
-EVERY 01/77-level item and its subordinate fields — no exceptions. That includes the "boring" ones: plain CALL-linkage buffer areas (e.g. \`01 LSAA-XXX PIC X(1024).\`), status/return-code fields, copybook-shaped record buffers, counters, flags, constants, timestamps and work areas, plus any LINKAGE SECTION items. Table columns: field, PIC, length, initial value, purpose, and the paragraphs that read or write it. Group logically (constants / flags / counters / timestamps / record & linkage buffers / work fields). A reviewer will mechanically grep the source for every 01/77 level and fail this page if even one name is absent.
-
-## 5. Procedure Division — Complete Paragraph Inventory
-First a table of EVERY paragraph/SECTION in source order: name, one-line purpose, performed-by (callers), performs (callees), files touched.
-Then a Mermaid call-graph (graph TD) of the PERFORM structure covering EVERY paragraph.
-
-## 6. Paragraph-by-Paragraph Analysis (THE CORE — be exhaustive)
-One ### subsection PER PARAGRAPH, in source order. Do NOT group or summarize multiple paragraphs together. For each: purpose; trigger/caller; numbered step-by-step logic; every file operation (verb, file, key used, status handling); every condition/branch and what each path does; data transformations (source field → target field); a Mermaid flowchart (graph TD) for any paragraph with branching or loops.
-
-## 7. Control & Restart Mechanisms
-Any checkpoint/timestamp/incremental-processing/commit logic: which fields and files implement it, the exact sequence (Mermaid sequenceDiagram), what happens on abnormal termination, rerun/restart safety analysis.
-
-## 8. End-to-End Data Flow
-Mermaid flowchart (graph TD): every input file → the transformations/decision points → every output/updated file. Follow with a field-level mapping table (output field ← source field/derivation) for the primary output record.
-
-## 9. Error Handling Inventory
-EVERY file-status check, INVALID KEY clause, error flag set/test, error display/abend path: table of location (paragraph + lines), condition detected, and the program's response.
-
-## 10. External Dependencies & Cross-Program Relationships
-Called programs (CALL statements), callers if inferable from comments, shared files that couple this program to others, JCL/scheduling hints found in comments.
-
-## 11. Operational Notes & Gotchas
-Concrete, evidence-based warnings: rerun/duplicate-processing risks, sort-order assumptions, REWRITE-after-READ requirements, counter overflow limits (compute the actual limit from the PIC), locking/contention, hard-coded values that look like configuration.
-
-## 12. Glossary
-Business and technical terms appearing in the source (field prefixes, file names, domain abbreviations) with their meanings as evidenced by usage.
-
-COMPLETENESS RULES (these override brevity):
-- Section 6 MUST contain one subsection for EVERY paragraph listed in section 5 — a reviewer will diff the two lists.
-- Section 4 MUST contain EVERY working-storage item — a reviewer will grep the source for 01/77 levels and check.
-- Prefer tables over prose. Cite line numbers everywhere. This document must exceed the detail of a human-written 8-page program analysis; length is NOT a concern, completeness is.
-
-CRITICAL: All diagrams MUST follow strict vertical orientation:
-       - Use "graph TD" (top-down) directive for flow diagrams
-       - NEVER use "graph LR" (left-right)
-       - Maximum node width should be 3-4 words
-       - For sequence diagrams:
-         - Start with "sequenceDiagram" directive on its own line
-         - Define ALL participants at the beginning using "participant" keyword
-         - Optionally specify participant types: actor, boundary, control, entity, database, collections, queue
-         - Use descriptive but concise participant names, or use aliases: "participant A as Alice"
-         - Use the correct Mermaid arrow syntax (8 types available):
-           - -> solid line without arrow (rarely used)
-           - --> dotted line without arrow (rarely used)
-           - ->> solid line with arrowhead (most common for requests/calls)
-           - -->> dotted line with arrowhead (most common for responses/returns)
-           - ->x solid line with X at end (failed/error message)
-           - -->x dotted line with X at end (failed/error response)
-           - -) solid line with open arrow (async message, fire-and-forget)
-           - --) dotted line with open arrow (async response)
-           - Examples: A->>B: Request, B-->>A: Response, A->xB: Error, A-)B: Async event
-         - Use +/- suffix for activation boxes: A->>+B: Start (activates B), B-->>-A: End (deactivates B)
-         - Group related participants using "box": box GroupName ... end
-         - Use structural elements for complex flows:
-           - loop LoopText ... end (for iterations)
-           - alt ConditionText ... else ... end (for conditionals)
-           - opt OptionalText ... end (for optional flows)
-           - par ParallelText ... and ... end (for parallel actions)
-           - critical CriticalText ... option ... end (for critical regions)
-           - break BreakText ... end (for breaking flows/exceptions)
-         - Add notes for clarification: "Note over A,B: Description", "Note right of A: Detail"
-         - Use autonumber directive to add sequence numbers to messages
-         - NEVER use flowchart-style labels like A--|label|-->B. Always use a colon for labels: A->>B: My Label
-
-IMPORTANT: Generate the content in ${language === 'en' ? 'English' :
-            language === 'ja' ? 'Japanese (日本語)' :
-            language === 'zh' ? 'Mandarin Chinese (中文)' :
-            language === 'zh-tw' ? 'Traditional Chinese (繁體中文)' :
-            language === 'es' ? 'Spanish (Español)' :
-            language === 'kr' ? 'Korean (한국어)' :
-            language === 'vi' ? 'Vietnamese (Tiếng Việt)' :
-            language === "pt-br" ? "Brazilian Portuguese (Português Brasileiro)" :
-            language === "fr" ? "Français (French)" :
-            language === "ru" ? "Русский (Russian)" :
-            'English'} language.
-
-[WIKI_PAGE_TOPIC]: ${page.title}
-[CURRENT_FILE_CONTENT]: provided in the request context.
-`;
-
-        const promptContent = isDeepDive ? deepDivePrompt : standardPrompt;
-
-        // Prepare request body
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const requestBody: Record<string, any> = {
-          repo_url: repoUrl,
-          type: effectiveRepoInfo.type,
-          messages: [{
-            role: 'user',
-            content: promptContent
-          }],
-          include_usage: true,
-        };
-
-        // Add tokens if available
-        addTokensToRequestBody(requestBody, currentToken, effectiveRepoInfo.type, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, language, modelExcludedDirs, modelExcludedFiles, modelIncludedDirs, modelIncludedFiles);
-
-        // Deep-dive pages get the full program source injected server-side
-        if (isDeepDive) {
-          if (page.filePaths.length > 0) {
-            requestBody.filePath = page.filePaths[0];
-          } else {
-            console.warn(`Deep-dive page ${page.id} has no filePaths — full-source injection skipped; page will be shallow`);
-          }
-        }
-
-        // Use WebSocket for communication
-        const genStart = Date.now();
-        let content = '';
-        let ws: WebSocket | undefined;
-
-        try {
-          // Resolve the WebSocket URL (runtime-configured; follows the page host)
-          const wsUrl = getWebSocketUrl();
-
-          // Create a new WebSocket connection
-          ws = new WebSocket(wsUrl);
-
-          // Create a promise that resolves when the WebSocket connection is complete
-          await new Promise<void>((resolve, reject) => {
-            // If the connection doesn't open within 5 seconds, fall back to HTTP
-            const timeout = setTimeout(() => {
-              reject(new Error('WebSocket connection timeout'));
-            }, 5000);
-
-            ws!.onopen = () => {
-              clearTimeout(timeout);
-              console.log(`WebSocket connection established for page: ${page.title}`);
-              // Send the request as JSON
-              ws!.send(JSON.stringify(requestBody));
-              resolve();
-            };
-
-            ws!.onerror = (error) => {
-              clearTimeout(timeout);
-              console.error('WebSocket error:', error);
-              reject(new Error('WebSocket connection failed'));
-            };
-          });
-
-          // Create a promise that resolves when the WebSocket response is complete
-          await new Promise<void>((resolve, reject) => {
-            // Handle incoming messages
-            ws!.onmessage = (event) => {
-              content += event.data;
-            };
-
-            // Handle WebSocket close
-            ws!.onclose = () => {
-              console.log(`WebSocket connection closed for page: ${page.title}`);
-              resolve();
-            };
-
-            // Handle WebSocket errors
-            ws!.onerror = (error) => {
-              console.error('WebSocket error during message reception:', error);
-              reject(new Error('WebSocket error during message reception'));
-            };
-          });
-        } catch (wsError) {
-          console.error('WebSocket error, falling back to HTTP:', wsError);
-
-          // Detach the message handler and close the socket so a late message
-          // can't append to `content` after we reset it for the HTTP fallback.
-          if (ws) {
-            ws.onmessage = null;
-            try { ws.close(); } catch { /* ignore */ }
-          }
-
-          // Fall back to HTTP if WebSocket fails
-          const response = await fetch(`/api/chat/stream`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(requestBody)
-          });
-
-          if (!response.ok) {
-            const errorText = await response.text().catch(() => 'No error details available');
-            console.error(`API error (${response.status}): ${errorText}`);
-            throw new Error(`Error generating page content: ${response.status} - ${response.statusText}`);
-          }
-
-          // Process the response
-          content = '';
-          const reader = response.body?.getReader();
-          const decoder = new TextDecoder();
-
-          if (!reader) {
-            throw new Error('Failed to get response reader');
-          }
-
-          try {
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              content += decoder.decode(value, { stream: true });
-            }
-            // Ensure final decoding
-            content += decoder.decode();
-          } catch (readError) {
-            console.error('Error reading stream:', readError);
-            throw new Error('Error processing response stream');
-          }
-        }
-
-        // Strip and account the usage trailer (before any content cleanup)
-        const genExtract = extractUsageMarker(content);
-        content = genExtract.content;
-        if (genExtract.usage) {
-          runStatsRef.current.generation.input_tokens += genExtract.usage.input_tokens;
-          runStatsRef.current.generation.output_tokens += genExtract.usage.output_tokens;
-        }
-        runStatsRef.current.generation.ms += Date.now() - genStart;
-
-        // Clean up markdown delimiters
-        content = content.replace(/^```markdown\s*/i, '').replace(/```\s*$/i, '');
-
-        console.log(`Received content for ${page.title}, length: ${content.length} characters`);
-
-        // Self-review pass: a fresh request to the same model verifies the page
-        // against the repo code (RAG via rag_query) and corrects it. Toggleable;
-        // any failure keeps the original content.
-        if (isSelfReviewEnabled && content.trim() && !content.startsWith('Error')) {
-          setLoadingMessage(`Reviewing ${page.title} against the codebase...`);
-          const revStart = Date.now();
-          try {
-            const reviewBody: Record<string, any> = {  // eslint-disable-line @typescript-eslint/no-explicit-any
-              repo_url: repoUrl,
-              type: effectiveRepoInfo.type,
-              messages: [{
-                role: 'user',
-                content: buildSelfReviewPrompt({ ...page, content }, repoUrl),
-              }],
-              rag_query: buildPageRagQuery(page),
-              include_usage: true,
-            };
-            // Deep-dive pages get the full program source injected server-side
-            // during generation; give the review pass the same grounding.
-            if (isDeepDive && page.filePaths.length > 0) {
-              reviewBody.filePath = page.filePaths[0];
-            }
-            addTokensToRequestBody(reviewBody, currentToken, effectiveRepoInfo.type, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, language, modelExcludedDirs, modelExcludedFiles, modelIncludedDirs, modelIncludedFiles);
-            const reviewed = await runChatOnce(reviewBody as unknown as ChatCompletionRequest);
-            runStatsRef.current.review.ms += Date.now() - revStart;
-            // Account the usage trailer first — it would otherwise break the
-            // NO_CHANGES exact-match in parseRevisedContent.
-            const revExtract = extractUsageMarker(reviewed);
-            if (revExtract.usage) {
-              runStatsRef.current.review.input_tokens += revExtract.usage.input_tokens;
-              runStatsRef.current.review.output_tokens += revExtract.usage.output_tokens;
-            }
-            const { content: corrected, changed } = parseRevisedContent(content, revExtract.content);
-            if (changed) {
-              console.log(`Self-review corrected ${page.title} (${content.length} -> ${corrected.length} chars)`);
-              content = corrected;
-            } else {
-              console.log(`Self-review: no changes for ${page.title}`);
-            }
-          } catch (reviewErr) {
-            runStatsRef.current.review.ms += Date.now() - revStart;
-            console.warn(`Self-review failed for ${page.title}, keeping original:`, reviewErr);
-          }
-        }
-
-        // Store the FINAL generated content
-        const updatedPage = { ...page, content };
-        setGeneratedPages(prev => ({ ...prev, [page.id]: updatedPage }));
-        // Store this as the original for potential mermaid retries
-        setOriginalMarkdown(prev => ({ ...prev, [page.id]: content }));
-
-        resolve();
-      } catch (err) {
-        console.error(`Error generating content for page ${page.id}:`, err);
-        const errorMessage = err instanceof Error ? err.message : 'Unknown error';
-        // Update page state to show error
-        setGeneratedPages(prev => ({
-          ...prev,
-          [page.id]: { ...page, content: `Error generating content: ${errorMessage}` }
-        }));
-        setError(`Failed to generate content for ${page.title}.`);
-        resolve(); // Resolve even on error to unblock queue
-      } finally {
-        // Clear the processing flag for this page
-        // This must happen in the finally block to ensure the flag is cleared
-        // even if an error occurs during processing
-        activeContentRequests.delete(page.id);
-
-        // Mark page as done
-        setPagesInProgress(prev => {
-          const next = new Set(prev);
-          next.delete(page.id);
-          return next;
-        });
-        setLoadingMessage(undefined); // Clear specific loading message
-      }
-    });
-  }, [generatedPages, currentToken, effectiveRepoInfo, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, modelExcludedDirs, modelExcludedFiles, language, activeContentRequests, generateFileUrl, isSelfReviewEnabled]);
-
-  // Determine the wiki structure from repository data
-  const determineWikiStructure = useCallback(async (fileTree: string, readme: string, owner: string, repo: string) => {
-    if (!owner || !repo) {
-      setError('Invalid repository information. Owner and repo name are required.');
-      setIsLoading(false);
-      setEmbeddingError(false); // Reset embedding error state
-      return;
-    }
-
-    // Skip if structure request is already in progress
-    if (structureRequestInProgress) {
-      console.log('Wiki structure determination already in progress, skipping duplicate call');
-      return;
-    }
-
+  // --- Server-side generation: cache reads + job enqueue/polling -----------
+  // The old in-browser orchestration (structure call, per-page websocket
+  // generation, self-review) moved into the backend job queue; this page is
+  // now a viewer that enqueues jobs and polls their progress.
+
+  // Read the selected version's wiki from the server cache; returns whether a
+  // usable wiki was loaded. Never flips global loading state — callers decide.
+  const refreshFromCache = useCallback(async (override?: { provider?: string; model?: string }): Promise<boolean> => {
     try {
-      setStructureRequestInProgress(true);
-      setLoadingMessage(messages.loading?.determiningStructure || 'Determining wiki structure...');
-
-      // Get repository URL
-      const repoUrl = getRepoUrl(effectiveRepoInfo);
-
-      // Prepare request body
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const requestBody: Record<string, any> = {
-        repo_url: repoUrl,
-        type: effectiveRepoInfo.type,
-        messages: [{
-          role: 'user',
-content: `Analyze this GitHub repository ${owner}/${repo} and create a wiki structure for it.
-
-1. The complete file tree of the project:
-<file_tree>
-${fileTree}
-</file_tree>
-
-2. The README file of the project:
-<readme>
-${readme}
-</readme>
-
-I want to create a wiki for this repository. Determine the most logical structure for a wiki based on the repository's content.
-
-IMPORTANT: The wiki content will be generated in ${language === 'en' ? 'English' :
-            language === 'ja' ? 'Japanese (日本語)' :
-            language === 'zh' ? 'Mandarin Chinese (中文)' :
-            language === 'zh-tw' ? 'Traditional Chinese (繁體中文)' :
-            language === 'es' ? 'Spanish (Español)' :
-            language === 'kr' ? 'Korean (한国語)' :
-            language === 'vi' ? 'Vietnamese (Tiếng Việt)' :
-            language === "pt-br" ? "Brazilian Portuguese (Português Brasileiro)" :
-            language === "fr" ? "Français (French)" :
-            language === "ru" ? "Русский (Russian)" :
-            'English'} language.
-
-When designing the wiki structure, include pages that would benefit from visual diagrams, such as:
-- Architecture overviews
-- Data flow descriptions
-- Component relationships
-- Process workflows
-- State machines
-- Class hierarchies
-
-${isComprehensiveView ? `
-Produce a SINGLE wiki that contains THREE top-level documents, each as its own top-level section (use subsections for the document's internal structure). Document the EXISTING system as-is (these are documentation views, not a change request). Only include a page/section if the repository content supports it. The three top-level sections, in this order:
-
-=== Top-level section 1: "📘 Wiki" (general technical wiki) ===
-A conventional developer wiki of the codebase:
-- Overview (general information about the project)
-- System Architecture (how the system is designed)
-- Core Features (key functionality)
-- Data Management/Flow (how data is stored, processed, accessed, and managed)
-- Components / Programs (the main programs or modules and what they do)
-- Deployment/Infrastructure (how it runs / is deployed, if evident)
-
-=== Top-level section 2: "📐 TSD" (Technical Specification Document) ===
-A formal technical spec of the existing system, with these subsections:
-- Introduction (purpose and high-level overview)
-- Scope (Assumptions; Inclusions — Inputs, Outputs, Interfaces, Online/Batch Processing, Scheduling, Error Handling, Access Restrictions; Exclusions; Constraints)
-- Functional Specification (functional and non-functional behavior — what each program does)
-- System Overview (System Platform e.g. AS400/LifeAsia/DB2-400/OS400 if evident; Program Flow; Security Control — IAM, Logging, Encryption, Network, Database Security, Application Security; System Interface)
-- Database Design (Physical files [PF], Logical files [LF], copybooks and their record/data structures, Table definitions)
-- Program Inventory (one page per major program/group: business function and key logic, e.g. "CAL101", "GETPLONREC")
-- Schedule / Batch Processing (batch jobs and scheduling)
-- Appendix
-
-=== Top-level section 3: "📋 BRD" (Business and Functional Requirement) ===
-A business-oriented requirements document inferred from the system's behavior:
-- Background (business context and purpose of the system)
-- Boundaries (Scope — Inclusions/Exclusions; Assumptions; Constraints)
-- Business Requirements (Current Processing; Requirement Specification — list as BR# items; Business Flow Diagram; Data Archive and Housekeeping)
-- Functional Requirements (list as FR# items, each mapped to a BR#)
-- Non-Functional Requirements (Performance, Capacity, Availability, Reliability, Usability, Other)
-- Security Control (IAM, Log and Event Management, Encryption, Network, Database Security, Application Security, General Security)
-- Reference (Definition of Terminologies; Attachments)
-
-=== Top-level section 4: "🔬 Program Analysis" (per-program deep dive) ===
-EXACTLY ONE page per program source file in the repository (a program source file is any COBOL/RPG/source member — e.g. *.cbl, *.cob, *.rpg, or *.txt files whose content is program source). Rules for these pages:
-- The page id MUST follow the pattern "page-analysis-<program-name-lowercase>" (e.g. "page-analysis-bv401").
-- The page title MUST be "Program Deep Dive: <PROGRAM-NAME>".
-- relevant_files MUST contain EXACTLY the one source file for that program (plus its copybook files if they exist as separate files in the repository).
-- importance MUST be "high".
-- Do NOT create analysis pages for non-program files (READMEs, JCL listings, data files), and do NOT merge multiple programs into one page.
-
-Each top-level section should contain its own pages/subsections. The same underlying source files may be cited across all three documents — that is expected, since each presents the system from a different angle (developer wiki / technical spec / business requirements).
-
-Return your analysis in the following XML format:
-
-<wiki_structure>
-  <title>[Overall title for the wiki]</title>
-  <description>[Brief description of the repository]</description>
-  <sections>
-    <section id="section-1">
-      <title>[Section title]</title>
-      <pages>
-        <page_ref>page-1</page_ref>
-        <page_ref>page-2</page_ref>
-      </pages>
-      <subsections>
-        <section_ref>section-2</section_ref>
-      </subsections>
-    </section>
-    <!-- More sections as needed -->
-  </sections>
-  <pages>
-    <page id="page-1">
-      <title>[Page title]</title>
-      <description>[Brief description of what this page will cover]</description>
-      <importance>high|medium|low</importance>
-      <relevant_files>
-        <file_path>[Path to a relevant file]</file_path>
-        <!-- More file paths as needed -->
-      </relevant_files>
-      <related_pages>
-        <related>page-2</related>
-        <!-- More related page IDs as needed -->
-      </related_pages>
-      <parent_section>section-1</parent_section>
-    </page>
-    <!-- More pages as needed -->
-  </pages>
-</wiki_structure>
-` : `
-Return your analysis in the following XML format:
-
-<wiki_structure>
-  <title>[Overall title for the wiki]</title>
-  <description>[Brief description of the repository]</description>
-  <pages>
-    <page id="page-1">
-      <title>[Page title]</title>
-      <description>[Brief description of what this page will cover]</description>
-      <importance>high|medium|low</importance>
-      <relevant_files>
-        <file_path>[Path to a relevant file]</file_path>
-        <!-- More file paths as needed -->
-      </relevant_files>
-      <related_pages>
-        <related>page-2</related>
-        <!-- More related page IDs as needed -->
-      </related_pages>
-    </page>
-    <!-- More pages as needed -->
-  </pages>
-</wiki_structure>
-`}
-
-IMPORTANT FORMATTING INSTRUCTIONS:
-- Return ONLY the valid XML structure specified above
-- DO NOT wrap the XML in markdown code blocks (no \`\`\` or \`\`\`xml)
-- DO NOT include any explanation text before or after the XML
-- Ensure the XML is properly formatted and valid
-- Start directly with <wiki_structure> and end with </wiki_structure>
-
-IMPORTANT:
-1. Create ${isComprehensiveView ? '18-30 pages total spread across the Wiki, TSD and BRD documents, PLUS exactly one "🔬 Program Analysis" page per program source file (these do not count toward the 18-30)' : '4-6 pages'} that would make a ${isComprehensiveView ? 'comprehensive' : 'concise'} wiki for this repository
-2. Each page should focus on a specific aspect of the codebase (e.g., architecture, key features, setup)
-3. The relevant_files should be actual files from the repository that would be used to generate that page
-4. Return ONLY valid XML with the structure specified above, with no markdown code block delimiters`
-        }]
-      };
-
-      // Add tokens if available
-      addTokensToRequestBody(requestBody, currentToken, effectiveRepoInfo.type, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, language, modelExcludedDirs, modelExcludedFiles, modelIncludedDirs, modelIncludedFiles);
-      requestBody.include_usage = true;
-
-      // Use WebSocket for communication.
-      // The whole request/extract sequence retries because the structure
-      // response occasionally arrives truncated or without parseable XML.
-      const structureStart = Date.now();
-      let responseText = '';
-      let xmlMatch: RegExpMatchArray | null = null;
-      const MAX_STRUCTURE_ATTEMPTS = 3;
-
-      for (let attempt = 1; attempt <= MAX_STRUCTURE_ATTEMPTS && !xmlMatch; attempt++) {
-      responseText = '';
-
-      try {
-        // Resolve the WebSocket URL (runtime-configured; follows the page host)
-        const wsUrl = getWebSocketUrl();
-
-        // Create a new WebSocket connection
-        const ws = new WebSocket(wsUrl);
-
-        // Create a promise that resolves when the WebSocket connection is complete
-        await new Promise<void>((resolve, reject) => {
-          // Set up event handlers
-          ws.onopen = () => {
-            console.log('WebSocket connection established for wiki structure');
-            // Send the request as JSON
-            ws.send(JSON.stringify(requestBody));
-            resolve();
-          };
-
-          ws.onerror = (error) => {
-            console.error('WebSocket error:', error);
-            reject(new Error('WebSocket connection failed'));
-          };
-
-          // If the connection doesn't open within 5 seconds, fall back to HTTP
-          const timeout = setTimeout(() => {
-            reject(new Error('WebSocket connection timeout'));
-          }, 5000);
-
-          // Clear the timeout if the connection opens successfully
-          ws.onopen = () => {
-            clearTimeout(timeout);
-            console.log('WebSocket connection established for wiki structure');
-            // Send the request as JSON
-            ws.send(JSON.stringify(requestBody));
-            resolve();
-          };
-        });
-
-        // Create a promise that resolves when the WebSocket response is complete
-        await new Promise<void>((resolve, reject) => {
-          // Handle incoming messages
-          ws.onmessage = (event) => {
-            responseText += event.data;
-          };
-
-          // Handle WebSocket close
-          ws.onclose = () => {
-            console.log('WebSocket connection closed for wiki structure');
-            resolve();
-          };
-
-          // Handle WebSocket errors
-          ws.onerror = (error) => {
-            console.error('WebSocket error during message reception:', error);
-            reject(new Error('WebSocket error during message reception'));
-          };
-        });
-      } catch (wsError) {
-        console.error('WebSocket error, falling back to HTTP:', wsError);
-
-        // Fall back to HTTP if WebSocket fails
-        const response = await fetch(`/api/chat/stream`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(requestBody)
-        });
-
-        if (!response.ok) {
-          throw new Error(`Error determining wiki structure: ${response.status}`);
-        }
-
-        // Process the response
-        responseText = '';
-        const reader = response.body?.getReader();
-        const decoder = new TextDecoder();
-
-        if (!reader) {
-          throw new Error('Failed to get response reader');
-        }
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          responseText += decoder.decode(value, { stream: true });
-        }
-      }
-
-      if(responseText.includes('Error preparing retriever: Environment variable OPENAI_API_KEY must be set')) {
-         setEmbeddingError(true);
-         throw new Error('OPENAI_API_KEY environment variable is not set. Please configure your OpenAI API key.');
-       }
-
-       if(responseText.includes('Ollama model') && responseText.includes('not found')) {
-         setEmbeddingError(true);
-         throw new Error('The specified Ollama embedding model was not found. Please ensure the model is installed locally or select a different embedding model in the configuration.');
-       }
-
-      // Strip and account the usage trailer (per attempt) before any cleanup
-      const structExtract = extractUsageMarker(responseText);
-      responseText = structExtract.content;
-      if (structExtract.usage) {
-        runStatsRef.current.generation.input_tokens += structExtract.usage.input_tokens;
-        runStatsRef.current.generation.output_tokens += structExtract.usage.output_tokens;
-      }
-
-        // Clean up markdown delimiters
-      responseText = responseText.replace(/^```(?:xml)?\s*/i, '').replace(/```\s*$/i, '');
-
-      // Extract wiki structure from response
-      xmlMatch = responseText.match(/<wiki_structure>[\s\S]*?<\/wiki_structure>/m);
-      if (!xmlMatch) {
-        console.error(
-          `Wiki structure attempt ${attempt}/${MAX_STRUCTURE_ATTEMPTS}: no valid XML in response ` +
-          `(received ${responseText.length} chars; ` +
-          `has opening tag: ${responseText.includes('<wiki_structure>')}; ` +
-          `tail: ${JSON.stringify(responseText.slice(-150))})`
-        );
-        if (attempt < MAX_STRUCTURE_ATTEMPTS) {
-          setLoadingMessage(`Structure response was invalid — retrying (attempt ${attempt + 1}/${MAX_STRUCTURE_ATTEMPTS})...`);
-        }
-      }
-      } // end structure attempts loop
-
-      runStatsRef.current.generation.ms += Date.now() - structureStart;
-
-      if (!xmlMatch) {
-        throw new Error('No valid XML found in response');
-      }
-
-      let xmlText = xmlMatch[0];
-      xmlText = xmlText.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
-      // Try parsing with DOMParser
-      const parser = new DOMParser();
-      const xmlDoc = parser.parseFromString(xmlText, "text/xml");
-
-      // Check for parsing errors
-      const parseError = xmlDoc.querySelector('parsererror');
-      if (parseError) {
-        // Log the first few elements to see what was parsed
-        const elements = xmlDoc.querySelectorAll('*');
-        if (elements.length > 0) {
-          console.log('First 5 element names:',
-            Array.from(elements).slice(0, 5).map(el => el.nodeName).join(', '));
-        }
-
-        // We'll continue anyway since the XML might still be usable
-      }
-
-      // Extract wiki structure
-      let title = '';
-      let description = '';
-      let pages: WikiPage[] = [];
-
-      // Try using DOM parsing first
-      const titleEl = xmlDoc.querySelector('title');
-      const descriptionEl = xmlDoc.querySelector('description');
-      const pagesEls = xmlDoc.querySelectorAll('page');
-
-      title = titleEl ? titleEl.textContent || '' : '';
-      description = descriptionEl ? descriptionEl.textContent || '' : '';
-
-      // Parse pages using DOM
-      pages = [];
-
-      if (parseError && (!pagesEls || pagesEls.length === 0)) {
-        console.error('Wiki structure XML failed to parse and no pages were found');
-        throw new Error('Failed to parse the generated wiki structure. Please try regenerating the wiki.');
-      }
-
-      const seenPageIds = new Set<string>();
-      pagesEls.forEach((pageEl, index) => {
-        let id = pageEl.getAttribute('id') || `page-${index + 1}`;
-        // Guarantee uniqueness so a fallback id can't collide with an explicit one
-        while (seenPageIds.has(id)) {
-          id = `${id}-dup`;
-        }
-        seenPageIds.add(id);
-        const titleEl = pageEl.querySelector('title');
-        const importanceEl = pageEl.querySelector('importance');
-        const filePathEls = pageEl.querySelectorAll('file_path');
-        const relatedEls = pageEl.querySelectorAll('related');
-
-        const title = titleEl ? titleEl.textContent || '' : '';
-        const importance = importanceEl ?
-          (importanceEl.textContent === 'high' ? 'high' :
-            importanceEl.textContent === 'medium' ? 'medium' : 'low') : 'medium';
-
-        const filePaths: string[] = [];
-        filePathEls.forEach(el => {
-          if (el.textContent) filePaths.push(el.textContent);
-        });
-
-        const relatedPages: string[] = [];
-        relatedEls.forEach(el => {
-          if (el.textContent) relatedPages.push(el.textContent);
-        });
-
-        pages.push({
-          id,
-          title,
-          content: '', // Will be generated later
-          filePaths,
-          importance,
-          relatedPages
-        });
+      const params = new URLSearchParams({
+        owner: effectiveRepoInfo.owner,
+        repo: effectiveRepoInfo.repo,
+        repo_type: effectiveRepoInfo.type,
+        language: language,
+        comprehensive: isComprehensiveView.toString(),
       });
+      // When a specific provider/model is selected (from URL params or the model
+      // selector), load that exact cached version; otherwise the backend returns
+      // the most recently generated one.
+      const provider = override?.provider ?? selectedProviderState;
+      const model = override?.model ?? selectedModelState;
+      if (provider && model) {
+        params.append('provider', provider);
+        params.append('model', model);
+      }
+      const response = await fetch(`/api/wiki_cache?${params.toString()}`);
 
-      // Extract sections if they exist in the XML
-      const sections: WikiSection[] = [];
-      const rootSections: string[] = [];
-
-      // Try to parse sections if we're in comprehensive view
-      if (isComprehensiveView) {
-        const sectionsEls = xmlDoc.querySelectorAll('section');
-
-        if (sectionsEls && sectionsEls.length > 0) {
-          // Process sections
-          sectionsEls.forEach(sectionEl => {
-            const id = sectionEl.getAttribute('id') || `section-${sections.length + 1}`;
-            const titleEl = sectionEl.querySelector('title');
-            const pageRefEls = sectionEl.querySelectorAll('page_ref');
-            const sectionRefEls = sectionEl.querySelectorAll('section_ref');
-
-            const title = titleEl ? titleEl.textContent || '' : '';
-            const pages: string[] = [];
-            const subsections: string[] = [];
-
-            pageRefEls.forEach(el => {
-              if (el.textContent) pages.push(el.textContent);
-            });
-
-            sectionRefEls.forEach(el => {
-              if (el.textContent) subsections.push(el.textContent);
-            });
-
-            sections.push({
-              id,
-              title,
-              pages,
-              subsections: subsections.length > 0 ? subsections : undefined
-            });
-
-            // Check if this is a root section (not referenced by any other section)
-            let isReferenced = false;
-            sectionsEls.forEach(otherSection => {
-              const otherSectionRefs = otherSection.querySelectorAll('section_ref');
-              otherSectionRefs.forEach(ref => {
-                if (ref.textContent === id) {
-                  isReferenced = true;
-                }
-              });
-            });
-
-            if (!isReferenced) {
-              rootSections.push(id);
-            }
-          });
-        }
+      if (!response.ok) {
+        console.error('Error fetching wiki cache from server:', response.status, await response.text());
+        return false;
       }
 
-      // Create wiki structure
-      const wikiStructure: WikiStructure = {
-        id: 'wiki',
-        title,
-        description,
-        pages,
-        sections,
-        rootSections
+      const cachedData = await response.json(); // Returns null if no cache
+      if (!(cachedData && cachedData.wiki_structure && cachedData.generated_pages && Object.keys(cachedData.generated_pages).length > 0)) {
+        console.log('No valid wiki data in server cache or cache is empty.');
+        return false;
+      }
+
+      console.log('Using server-cached wiki data');
+      if (cachedData.model) {
+        setSelectedModelState(cachedData.model);
+      }
+      if (cachedData.provider) {
+        setSelectedProviderState(cachedData.provider);
+      }
+      setWikiMeta({ generatedAt: cachedData.generated_at, repoCommit: cachedData.repo_commit, selfReviewed: cachedData.self_reviewed });
+
+      // Update repoInfo
+      if (cachedData.repo) {
+        setEffectiveRepoInfo(cachedData.repo);
+      } else if (cachedData.repo_url && !effectiveRepoInfo.repoUrl) {
+        const updatedRepoInfo = { ...effectiveRepoInfo, repoUrl: cachedData.repo_url };
+        setEffectiveRepoInfo(updatedRepoInfo); // Update effective repo info state
+        console.log('Using cached repo_url:', cachedData.repo_url);
+      }
+
+      // Ensure the cached structure has sections and rootSections
+      const cachedStructure = {
+        ...cachedData.wiki_structure,
+        sections: cachedData.wiki_structure.sections || [],
+        rootSections: cachedData.wiki_structure.rootSections || []
       };
 
-      setWikiStructure(wikiStructure);
-      setCurrentPageId(pages.length > 0 ? pages[0].id : undefined);
+      // If sections or rootSections are missing, create intelligent ones based on page titles
+      if (!cachedStructure.sections.length || !cachedStructure.rootSections.length) {
+        const pages = cachedStructure.pages;
+        const sections: WikiSection[] = [];
+        const rootSections: string[] = [];
 
-      // Start generating content for all pages with controlled concurrency
-      if (pages.length > 0) {
-        // Mark all pages as in progress
-        const initialInProgress = new Set(pages.map(p => p.id));
-        setPagesInProgress(initialInProgress);
+        // Group pages by common prefixes or categories
+        const pageClusters = new Map<string, WikiPage[]>();
 
-        console.log(`Starting generation for ${pages.length} pages with controlled concurrency`);
+        // Define common categories that might appear in page titles
+        const categories = [
+          { id: 'overview', title: 'Overview', keywords: ['overview', 'introduction', 'about'] },
+          { id: 'architecture', title: 'Architecture', keywords: ['architecture', 'structure', 'design', 'system'] },
+          { id: 'features', title: 'Core Features', keywords: ['feature', 'functionality', 'core'] },
+          { id: 'components', title: 'Components', keywords: ['component', 'module', 'widget'] },
+          { id: 'api', title: 'API', keywords: ['api', 'endpoint', 'service', 'server'] },
+          { id: 'data', title: 'Data Flow', keywords: ['data', 'flow', 'pipeline', 'storage'] },
+          { id: 'models', title: 'Models', keywords: ['model', 'ai', 'ml', 'integration'] },
+          { id: 'ui', title: 'User Interface', keywords: ['ui', 'interface', 'frontend', 'page'] },
+          { id: 'setup', title: 'Setup & Configuration', keywords: ['setup', 'config', 'installation', 'deploy'] }
+        ];
 
-        // Maximum concurrent requests
-        const MAX_CONCURRENT = 1;
+        // Initialize clusters with empty arrays
+        categories.forEach(category => {
+          pageClusters.set(category.id, []);
+        });
 
-        // Create a queue of pages
-        const queue = [...pages];
-        let activeRequests = 0;
+        // Add an "Other" category for pages that don't match any category
+        pageClusters.set('other', []);
 
-        // Function to process next items in queue
-        const processQueue = () => {
-          // Process as many items as we can up to our concurrency limit
-          while (queue.length > 0 && activeRequests < MAX_CONCURRENT) {
-            const page = queue.shift();
-            if (page) {
-              activeRequests++;
-              console.log(`Starting page ${page.title} (${activeRequests} active, ${queue.length} remaining)`);
+        // Assign pages to categories based on title keywords
+        pages.forEach((page: WikiPage) => {
+          const title = page.title.toLowerCase();
+          let assigned = false;
 
-              // Start generating content for this page
-              generatePageContent(page, owner, repo)
-                .finally(() => {
-                  // When done (success or error), decrement active count and process more
-                  activeRequests--;
-                  console.log(`Finished page ${page.title} (${activeRequests} active, ${queue.length} remaining)`);
-
-                  // Check if all work is done (queue empty and no active requests)
-                  if (queue.length === 0 && activeRequests === 0) {
-                    console.log("All page generation tasks completed.");
-                    setIsLoading(false);
-                    setLoadingMessage(undefined);
-                  } else {
-                    // Only process more if there are items remaining and we're under capacity
-                    if (queue.length > 0 && activeRequests < MAX_CONCURRENT) {
-                      processQueue();
-                    }
-                  }
-                });
-            }
-          }
-
-          // Additional check: If the queue started empty or becomes empty and no requests were started/active
-          if (queue.length === 0 && activeRequests === 0 && pages.length > 0 && pagesInProgress.size === 0) {
-            // This handles the case where the queue might finish before the finally blocks fully update activeRequests
-            // or if the initial queue was processed very quickly
-            console.log("Queue empty and no active requests after loop, ensuring loading is false.");
-            setIsLoading(false);
-            setLoadingMessage(undefined);
-          } else if (pages.length === 0) {
-            // Handle case where there were no pages to begin with
-            setIsLoading(false);
-            setLoadingMessage(undefined);
-          }
-        };
-
-        // Start processing the queue
-        processQueue();
-      } else {
-        // Set loading to false if there were no pages found
-        setIsLoading(false);
-        setLoadingMessage(undefined);
-      }
-
-    } catch (error) {
-      console.error('Error determining wiki structure:', error);
-      setIsLoading(false);
-      setError(error instanceof Error ? error.message : 'An unknown error occurred');
-      setLoadingMessage(undefined);
-    } finally {
-      setStructureRequestInProgress(false);
-    }
-  }, [generatePageContent, currentToken, effectiveRepoInfo, pagesInProgress.size, structureRequestInProgress, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, modelExcludedDirs, modelExcludedFiles, language, messages.loading, isComprehensiveView]);
-
-  // Fetch repository structure using GitHub or GitLab API
-  const fetchRepositoryStructure = useCallback(async () => {
-    // If a request is already in progress, don't start another one
-    if (requestInProgress) {
-      console.log('Repository fetch already in progress, skipping duplicate call');
-      return;
-    }
-
-    // Reset previous state
-    setWikiStructure(undefined);
-    setCurrentPageId(undefined);
-    setGeneratedPages({});
-    setPagesInProgress(new Set());
-    setError(null);
-    setEmbeddingError(false); // Reset embedding error state
-
-    try {
-      // Set the request in progress flag
-      setRequestInProgress(true);
-
-      // Update loading state
-      setIsLoading(true);
-      setLoadingMessage(messages.loading?.fetchingStructure || 'Fetching repository structure...');
-
-      let fileTreeData = '';
-      let readmeContent = '';
-
-      if (effectiveRepoInfo.type === 'local' && effectiveRepoInfo.localPath) {
-        try {
-          const response = await fetch(`/local_repo/structure?path=${encodeURIComponent(effectiveRepoInfo.localPath)}`);
-
-          if (!response.ok) {
-            const errorData = await response.text();
-            throw new Error(`Local repository API error (${response.status}): ${errorData}`);
-          }
-
-          const data = await response.json();
-          fileTreeData = data.file_tree;
-          readmeContent = data.readme;
-          // For local repos, we can't determine the actual branch, so use 'main' as default
-          setDefaultBranch('main');
-        } catch (err) {
-          throw err;
-        }
-      } else if (effectiveRepoInfo.type === 'github') {
-        // GitHub API approach
-        // Try to get the tree data for common branch names
-        let treeData = null;
-        let apiErrorDetails = '';
-
-        // Determine the GitHub API base URL based on the repository URL
-        const getGithubApiUrl = (repoUrl: string | null): string => {
-          if (!repoUrl) {
-            return 'https://api.github.com'; // Default to public GitHub
-          }
-          
-          try {
-            const url = new URL(repoUrl);
-            const hostname = url.hostname;
-            
-            // If it's the public GitHub, use the standard API URL
-            if (hostname === 'github.com') {
-              return 'https://api.github.com';
-            }
-            
-            // For GitHub Enterprise, use the enterprise API URL format
-            // GitHub Enterprise API URL format: https://github.company.com/api/v3
-            return `${url.protocol}//${hostname}/api/v3`;
-          } catch {
-            return 'https://api.github.com'; // Fallback to public GitHub if URL parsing fails
-          }
-        };
-
-        const githubApiBaseUrl = getGithubApiUrl(effectiveRepoInfo.repoUrl);
-        // First, try to get the default branch from the repository info
-        let defaultBranchLocal = null;
-        try {
-          const repoInfoResponse = await fetch(`${githubApiBaseUrl}/repos/${owner}/${repo}`, {
-            headers: createGithubHeaders(currentToken)
-          });
-          
-          if (repoInfoResponse.ok) {
-            const repoData = await repoInfoResponse.json();
-            defaultBranchLocal = repoData.default_branch;
-            console.log(`Found default branch: ${defaultBranchLocal}`);
-            // Store the default branch in state
-            setDefaultBranch(defaultBranchLocal || 'main');
-          }
-        } catch (err) {
-          console.warn('Could not fetch repository info for default branch:', err);
-        }
-
-        // Create list of branches to try, prioritizing the actual default branch
-        const branchesToTry = defaultBranchLocal 
-          ? [defaultBranchLocal, 'main', 'master'].filter((branch, index, arr) => arr.indexOf(branch) === index)
-          : ['main', 'master'];
-
-        for (const branch of branchesToTry) {
-          const apiUrl = `${githubApiBaseUrl}/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`;
-          const headers = createGithubHeaders(currentToken);
-
-          console.log(`Fetching repository structure from branch: ${branch}`);
-          try {
-            const response = await fetch(apiUrl, {
-              headers
-            });
-
-            if (response.ok) {
-              treeData = await response.json();
-              console.log('Successfully fetched repository structure');
+          // Try to find a matching category
+          for (const category of categories) {
+            if (category.keywords.some(keyword => title.includes(keyword))) {
+              pageClusters.get(category.id)?.push(page);
+              assigned = true;
               break;
-            } else {
-              const errorData = await response.text();
-              apiErrorDetails = `Status: ${response.status}, Response: ${errorData}`;
-              console.error(`Error fetching repository structure: ${apiErrorDetails}`);
             }
-          } catch (err) {
-            console.error(`Network error fetching branch ${branch}:`, err);
+          }
+
+          // If no category matched, put in "Other"
+          if (!assigned) {
+            pageClusters.get('other')?.push(page);
+          }
+        });
+
+        // Create sections for non-empty categories
+        for (const [categoryId, categoryPages] of pageClusters.entries()) {
+          if (categoryPages.length > 0) {
+            const category = categories.find(c => c.id === categoryId) ||
+                            { id: categoryId, title: categoryId === 'other' ? 'Other' : categoryId.charAt(0).toUpperCase() + categoryId.slice(1) };
+
+            const sectionId = `section-${categoryId}`;
+            sections.push({
+              id: sectionId,
+              title: category.title,
+              pages: categoryPages.map((p: WikiPage) => p.id)
+            });
+            rootSections.push(sectionId);
+
+            // Update page parentId
+            categoryPages.forEach((page: WikiPage) => {
+              page.parentId = sectionId;
+            });
           }
         }
 
-        if (!treeData || !treeData.tree) {
-          if (apiErrorDetails) {
-            throw new Error(`Could not fetch repository structure. API Error: ${apiErrorDetails}`);
-          } else {
-            throw new Error('Could not fetch repository structure. Repository might not exist, be empty or private.');
+        // If we still have no sections (unlikely), fall back to importance-based grouping
+        if (sections.length === 0) {
+          const highImportancePages = pages.filter((p: WikiPage) => p.importance === 'high').map((p: WikiPage) => p.id);
+          const mediumImportancePages = pages.filter((p: WikiPage) => p.importance === 'medium').map((p: WikiPage) => p.id);
+          const lowImportancePages = pages.filter((p: WikiPage) => p.importance === 'low').map((p: WikiPage) => p.id);
+
+          if (highImportancePages.length > 0) {
+            sections.push({
+              id: 'section-high',
+              title: 'Core Components',
+              pages: highImportancePages
+            });
+            rootSections.push('section-high');
+          }
+
+          if (mediumImportancePages.length > 0) {
+            sections.push({
+              id: 'section-medium',
+              title: 'Key Features',
+              pages: mediumImportancePages
+            });
+            rootSections.push('section-medium');
+          }
+
+          if (lowImportancePages.length > 0) {
+            sections.push({
+              id: 'section-low',
+              title: 'Additional Information',
+              pages: lowImportancePages
+            });
+            rootSections.push('section-low');
           }
         }
 
-        // Convert tree data to a string representation
-        fileTreeData = treeData.tree
-          .filter((item: { type: string; path: string }) => item.type === 'blob')
-          .map((item: { type: string; path: string }) => item.path)
-          .join('\n');
-
-        // Try to fetch README.md content
-        try {
-          const headers = createGithubHeaders(currentToken);
-
-          const readmeResponse = await fetch(`${githubApiBaseUrl}/repos/${owner}/${repo}/readme`, {
-            headers
-          });
-
-          if (readmeResponse.ok) {
-            const readmeData = await readmeResponse.json();
-            readmeContent = atob(readmeData.content);
-          } else {
-            console.warn(`Could not fetch README.md, status: ${readmeResponse.status}`);
-          }
-        } catch (err) {
-          console.warn('Could not fetch README.md, continuing with empty README', err);
-        }
-      }
-      else if (effectiveRepoInfo.type === 'gitlab') {
-        // GitLab API approach
-        const projectPath = extractUrlPath(effectiveRepoInfo.repoUrl ?? '')?.replace(/\.git$/, '') || `${owner}/${repo}`;
-        const projectDomain = extractUrlDomain(effectiveRepoInfo.repoUrl ?? "https://gitlab.com");
-        const encodedProjectPath = encodeURIComponent(projectPath);
-
-        const headers = createGitlabHeaders(currentToken);
-
-        /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
-        const filesData: any[] = [];
-
-        try {
-          // Step 1: Get project info to determine default branch
-          let projectInfoUrl: string;
-          let defaultBranchLocal = 'main'; // fallback
-          try {
-            const validatedUrl = new URL(projectDomain ?? ''); // Validate domain
-            projectInfoUrl = `${validatedUrl.origin}/api/v4/projects/${encodedProjectPath}`;
-          } catch (err) {
-            throw new Error(`Invalid project domain URL: ${projectDomain}`);
-          }
-          const projectInfoRes = await fetch(projectInfoUrl, { headers });
-
-          if (!projectInfoRes.ok) {
-            const errorData = await projectInfoRes.text();
-            throw new Error(`GitLab project info error: Status ${projectInfoRes.status}, Response: ${errorData}`);
-          }
-
-          const projectInfo = await projectInfoRes.json();
-          defaultBranchLocal = projectInfo.default_branch || 'main';
-          console.log(`Found GitLab default branch: ${defaultBranchLocal}`);
-          // Store the default branch in state
-          setDefaultBranch(defaultBranchLocal);
-
-          // Step 2: Paginate to fetch full file tree
-          let page = 1;
-          let morePages = true;
-          
-          while (morePages) {
-            const apiUrl = `${projectInfoUrl}/repository/tree?recursive=true&per_page=100&page=${page}`;
-            const response = await fetch(apiUrl, { headers });
-
-            if (!response.ok) {
-                const errorData = await response.text();
-              throw new Error(`Error fetching GitLab repository structure (page ${page}): ${errorData}`);
-            }
-
-            const pageData = await response.json();
-            filesData.push(...pageData);
-
-            const nextPage = response.headers.get('x-next-page');
-            morePages = !!nextPage;
-            page = nextPage ? parseInt(nextPage, 10) : page + 1;
-        }
-
-          if (!Array.isArray(filesData) || filesData.length === 0) {
-            throw new Error('Could not fetch repository structure. Repository might be empty or inaccessible.');
-        }
-
-          // Step 3: Format file paths
-        fileTreeData = filesData
-          .filter((item: { type: string; path: string }) => item.type === 'blob')
-          .map((item: { type: string; path: string }) => item.path)
-          .join('\n');
-
-          // Step 4: Try to fetch README.md content
-          const readmeUrl = `${projectInfoUrl}/repository/files/README.md/raw`;
-            try {
-            const readmeResponse = await fetch(readmeUrl, { headers });
-              if (readmeResponse.ok) {
-                readmeContent = await readmeResponse.text();
-                console.log('Successfully fetched GitLab README.md');
-              } else {
-              console.warn(`Could not fetch GitLab README.md status: ${readmeResponse.status}`);
-              }
-            } catch (err) {
-            console.warn(`Error fetching GitLab README.md:`, err);
-            }
-        } catch (err) {
-          console.error("Error during GitLab repository tree retrieval:", err);
-          throw err;
-        }
-      }
-      else if (effectiveRepoInfo.type === 'bitbucket') {
-        // Bitbucket API approach
-        const repoPath = extractUrlPath(effectiveRepoInfo.repoUrl ?? '') ?? `${owner}/${repo}`;
-        const encodedRepoPath = encodeURIComponent(repoPath);
-
-        // Try to get the file tree for common branch names
-        let filesData = null;
-        let apiErrorDetails = '';
-        let defaultBranchLocal = '';
-        const headers = createBitbucketHeaders(currentToken);
-
-        // First get project info to determine default branch
-        const projectInfoUrl = `https://api.bitbucket.org/2.0/repositories/${encodedRepoPath}`;
-        try {
-          const response = await fetch(projectInfoUrl, { headers });
-
-          const responseText = await response.text();
-
-          if (response.ok) {
-            const projectData = JSON.parse(responseText);
-            defaultBranchLocal = projectData.mainbranch.name;
-            // Store the default branch in state
-            setDefaultBranch(defaultBranchLocal);
-
-            // Bitbucket paginates /src; follow the `next` cursor to get the full tree
-            // (a single page caps at per_page, so repos with >100 files were truncated).
-            let apiUrl: string | null = `https://api.bitbucket.org/2.0/repositories/${encodedRepoPath}/src/${defaultBranchLocal}/?recursive=true&per_page=100`;
-            try {
-              const accumulatedValues: Array<{ type: string; path: string }> = [];
-              while (apiUrl) {
-                const response = await fetch(apiUrl, { headers });
-                const structureResponseText = await response.text();
-
-                if (!response.ok) {
-                  apiErrorDetails = `Status: ${response.status}, Response: ${structureResponseText}`;
-                  break;
-                }
-
-                const pageData = JSON.parse(structureResponseText);
-                if (Array.isArray(pageData.values)) {
-                  accumulatedValues.push(...pageData.values);
-                }
-                apiUrl = pageData.next || null;
-              }
-
-              if (accumulatedValues.length > 0) {
-                filesData = { values: accumulatedValues };
-              }
-            } catch (err) {
-              console.error(`Network error fetching Bitbucket branch ${defaultBranchLocal}:`, err);
-            }
-          } else {
-            const errorData = responseText;
-            apiErrorDetails = `Status: ${response.status}, Response: ${errorData}`;
-          }
-        } catch (err) {
-          console.error("Network error fetching Bitbucket project info:", err);
-        }
-
-        if (!filesData || !Array.isArray(filesData.values) || filesData.values.length === 0) {
-          if (apiErrorDetails) {
-            throw new Error(`Could not fetch repository structure. Bitbucket API Error: ${apiErrorDetails}`);
-          } else {
-            throw new Error('Could not fetch repository structure. Repository might not exist, be empty or private.');
-          }
-        }
-
-        // Convert files data to a string representation
-        fileTreeData = filesData.values
-          .filter((item: { type: string; path: string }) => item.type === 'commit_file')
-          .map((item: { type: string; path: string }) => item.path)
-          .join('\n');
-
-        // Try to fetch README.md content
-        try {
-          const headers = createBitbucketHeaders(currentToken);
-
-          const readmeResponse = await fetch(`https://api.bitbucket.org/2.0/repositories/${encodedRepoPath}/src/${defaultBranchLocal}/README.md`, {
-            headers
-          });
-
-          if (readmeResponse.ok) {
-            readmeContent = await readmeResponse.text();
-          } else {
-            console.warn(`Could not fetch Bitbucket README.md, status: ${readmeResponse.status}`);
-          }
-        } catch (err) {
-          console.warn('Could not fetch Bitbucket README.md, continuing with empty README', err);
-        }
+        cachedStructure.sections = sections;
+        cachedStructure.rootSections = rootSections;
       }
 
-      // Now determine the wiki structure
-      await determineWikiStructure(fileTreeData, readmeContent, owner, repo);
-
+      setWikiStructure(cachedStructure);
+      setGeneratedPages(cachedData.generated_pages);
+      // Keep the user's page selection across incremental refreshes
+      setCurrentPageId(prev =>
+        prev && cachedStructure.pages.some((p: WikiPage) => p.id === prev)
+          ? prev
+          : (cachedStructure.pages.length > 0 ? cachedStructure.pages[0].id : undefined));
+      setEmbeddingError(false);
+      setCacheMiss(false);
+      return true;
     } catch (error) {
-      console.error('Error fetching repository structure:', error);
-      setIsLoading(false);
-      setError(error instanceof Error ? error.message : 'An unknown error occurred');
-      setLoadingMessage(undefined);
-    } finally {
-      // Reset the request in progress flag
-      setRequestInProgress(false);
+      console.error('Error loading from server cache:', error);
+      return false;
     }
-  }, [owner, repo, determineWikiStructure, currentToken, effectiveRepoInfo, requestInProgress, messages.loading]);
+  }, [effectiveRepoInfo, language, isComprehensiveView, selectedProviderState, selectedModelState]);
+
+  // Does a job belong to the wiki version this page is showing?
+  const jobMatchesThisWiki = useCallback((job: WikiJobStatus): boolean =>
+    job.repo.owner === effectiveRepoInfo.owner &&
+    job.repo.repo === effectiveRepoInfo.repo &&
+    job.repo.type === effectiveRepoInfo.type &&
+    job.language === language &&
+    (!selectedProviderState || job.provider === selectedProviderState) &&
+    (!selectedModelState || job.model === selectedModelState),
+  [effectiveRepoInfo, language, selectedProviderState, selectedModelState]);
+
+  // Find a queued/running job for this wiki (used on mount and after a 409)
+  const findActiveJob = useCallback(async (): Promise<WikiJobStatus | null> => {
+    try {
+      const response = await fetch('/api/wiki_jobs');
+      if (!response.ok) return null;
+      const data = await response.json();
+      const jobs: WikiJobStatus[] = data.jobs || [];
+      return jobs.find(j => JOB_ACTIVE_STATUSES.includes(j.status) && jobMatchesThisWiki(j)) || null;
+    } catch (err) {
+      console.error('Error listing wiki jobs:', err);
+      return null;
+    }
+  }, [jobMatchesThisWiki]);
+
+  // Enqueue a server-side generation job; on 409 attach to the existing one
+  const enqueueJob = useCallback(async (forceRegenerate: boolean, overrideProvider?: string, overrideModel?: string, overrideToken?: string): Promise<WikiJobStatus | null> => {
+    const body = {
+      repo: { ...effectiveRepoInfo, token: overrideToken || currentToken || null },
+      language: language,
+      provider: overrideProvider ?? selectedProviderState,
+      model: overrideModel ?? selectedModelState,
+      comprehensive: isComprehensiveView,
+      self_review: isSelfReviewEnabled,
+      force_regenerate: forceRegenerate,
+      excluded_dirs: modelExcludedDirs || undefined,
+      excluded_files: modelExcludedFiles || undefined,
+      included_dirs: modelIncludedDirs || undefined,
+      included_files: modelIncludedFiles || undefined,
+      authorization_code: authCode || undefined,
+    };
+    const response = await fetch('/api/wiki_jobs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (response.status === 409) {
+      // Already queued/running for this version — just attach to it
+      console.log('Generation already in progress, attaching to the running job');
+      return await findActiveJob();
+    }
+    if (response.status === 401) {
+      throw new Error('Failed to validate the authorization code');
+    }
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => 'No error details available');
+      throw new Error(`Failed to start generation (${response.status}): ${errorText}`);
+    }
+    const { job_id } = await response.json();
+    const jobResponse = await fetch(`/api/wiki_jobs/${job_id}`);
+    if (jobResponse.ok) {
+      return await jobResponse.json();
+    }
+    return await findActiveJob();
+  }, [effectiveRepoInfo, currentToken, language, selectedProviderState, selectedModelState, isComprehensiveView, isSelfReviewEnabled, modelExcludedDirs, modelExcludedFiles, modelIncludedDirs, modelIncludedFiles, authCode, findActiveJob]);
+
+  // Cancel the watched job (auth code passed like the refresh flow does)
+  const cancelActiveJob = useCallback(async () => {
+    if (!activeJob) return;
+    try {
+      const params = authCode ? `?authorization_code=${encodeURIComponent(authCode)}` : '';
+      const response = await fetch(`/api/wiki_jobs/${activeJob.id}/cancel${params}`, { method: 'POST' });
+      if (!response.ok) {
+        if (response.status === 401) {
+          setError('Failed to validate the authorization code');
+          return;
+        }
+        console.error('Error cancelling job:', response.status, await response.text());
+      }
+    } catch (err) {
+      console.error('Error cancelling job:', err);
+    }
+  }, [activeJob, authCode]);
+
+  // Poll the watched job every 3s; reload the cache as pages land
+  useEffect(() => {
+    if (!activeJob || !JOB_ACTIVE_STATUSES.includes(activeJob.status)) return;
+    let stopped = false;
+
+    const poll = async () => {
+      try {
+        const response = await fetch(`/api/wiki_jobs/${activeJob.id}`);
+        if (!response.ok || stopped) return;
+        const job: WikiJobStatus = await response.json();
+        if (stopped) return;
+        setActiveJob(job);
+        // New pages were saved incrementally — pull them in
+        if (job.progress.pages_done > lastPagesDoneRef.current) {
+          lastPagesDoneRef.current = job.progress.pages_done;
+          const loaded = await refreshFromCache({ provider: job.provider, model: job.model });
+          if (loaded && !stopped) {
+            setIsLoading(false);
+            setLoadingMessage(undefined);
+          }
+        }
+        if (job.status === 'done') {
+          await refreshFromCache({ provider: job.provider, model: job.model });
+          if (stopped) return;
+          setIsLoading(false);
+          setLoadingMessage(undefined);
+          setActiveJob(null);
+        } else if (job.status === 'failed' || job.status === 'cancelled' || job.status === 'interrupted') {
+          // Pages generated so far are in the cache — show what exists
+          await refreshFromCache({ provider: job.provider, model: job.model });
+          if (stopped) return;
+          setIsLoading(false);
+          setLoadingMessage(undefined);
+        }
+      } catch (err) {
+        console.error('Error polling wiki job:', err);
+      }
+    };
+
+    poll();
+    const interval = setInterval(poll, 3000);
+    return () => {
+      stopped = true;
+      clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeJob?.id, activeJob?.status, refreshFromCache]);
 
   // Function to export wiki content
   const exportWiki = useCallback(async (format: 'markdown' | 'json') => {
@@ -1887,78 +714,17 @@ IMPORTANT:
     }
   }, [generatedPages, wikiStructure, effectiveRepoInfo, language, isComprehensiveView, selectedProviderState, selectedModelState, wikiMeta.selfReviewed]);
 
-  // No longer needed as we use the modal directly
-
+  // Submit / Regenerate from the model-selection modal. Submit switches to the
+  // selected version (loads its cache; enqueues a generation on a miss);
+  // Regenerate always enqueues with force_regenerate so the server deletes the
+  // target version and rebuilds it. Generation itself runs server-side.
   const confirmRefresh = useCallback(async (newToken?: string, forceRegenerate: boolean = false, overrideProvider?: string, overrideModel?: string) => {
     setShowModelOptions(false);
-    setLoadingMessage(messages.loading?.clearingCache || 'Clearing server cache...');
-    setIsLoading(true); // Show loading indicator immediately
 
     if (authRequired && !authCode) {
-      setIsLoading(false);
       console.error("Authorization code is required");
       setError('Authorization code is required');
       return;
-    }
-
-    // Without forceRegenerate we keep the saved version on the server: the reset
-    // below re-runs loadData, which loads the selected provider/model's cached wiki
-    // if it exists and only generates on a miss.
-    if (forceRegenerate) {
-      try {
-        const params = new URLSearchParams({
-          owner: effectiveRepoInfo.owner,
-          repo: effectiveRepoInfo.repo,
-          repo_type: effectiveRepoInfo.type,
-          language: language,
-          provider: overrideProvider ?? selectedProviderState,
-          model: overrideModel ?? selectedModelState,
-          is_custom_model: isCustomSelectedModelState.toString(),
-          custom_model: customSelectedModelState,
-          comprehensive: isComprehensiveView.toString(),
-          authorization_code: authCode,
-        });
-
-        // Add file filters configuration
-        if (modelExcludedDirs) {
-          params.append('excluded_dirs', modelExcludedDirs);
-        }
-        if (modelExcludedFiles) {
-          params.append('excluded_files', modelExcludedFiles);
-        }
-
-        const response = await fetch(`/api/wiki_cache?${params.toString()}`, {
-          method: 'DELETE',
-          headers: {
-            'Accept': 'application/json',
-          }
-        });
-
-        if (response.ok) {
-          console.log('Server-side wiki cache cleared successfully.');
-          // Optionally, show a success message for cache clearing if desired
-          // setLoadingMessage('Cache cleared. Refreshing wiki...');
-        } else {
-          const errorText = await response.text();
-          console.warn(`Failed to clear server-side wiki cache (status: ${response.status}): ${errorText}. Proceeding with refresh anyway.`);
-          // Optionally, inform the user about the cache clear failure but that refresh will still attempt
-          // setError(\`Cache clear failed: ${errorText}. Trying to refresh...\`);
-          if(response.status == 401) {
-            setIsLoading(false);
-            setLoadingMessage(undefined);
-            setError('Failed to validate the authorization code');
-            console.error('Failed to validate the authorization code')
-            return;
-          }
-        }
-      } catch (err) {
-        console.warn('Error calling DELETE /api/wiki_cache:', err);
-        setIsLoading(false);
-        setEmbeddingError(false); // Reset embedding error state
-        // Optionally, inform the user about the cache clear error
-        // setError(\`Error clearing cache: ${err instanceof Error ? err.message : String(err)}. Trying to refresh...\`);
-        throw err;
-      }
     }
 
     // Update token if provided
@@ -1971,234 +737,97 @@ IMPORTANT:
       window.history.replaceState({}, '', currentUrl.toString());
     }
 
-    // Proceed with the rest of the refresh logic
-    console.log('Refreshing wiki. Saved versions are kept unless Regenerate was used.');
+    const provider = overrideProvider ?? selectedProviderState;
+    const model = overrideModel ?? selectedModelState;
+    if (overrideProvider) setSelectedProviderState(overrideProvider);
+    if (overrideModel) setSelectedModelState(overrideModel);
 
-    // Clear the localStorage cache (if any remnants or if it was used before this change)
+    // Clear the localStorage cache (if any remnants from older versions)
     const localStorageCacheKey = getCacheKey(effectiveRepoInfo.owner, effectiveRepoInfo.repo, effectiveRepoInfo.type, language, isComprehensiveView);
     localStorage.removeItem(localStorageCacheKey);
 
-    // Reset cache loaded flag
-    cacheLoadedSuccessfully.current = false;
-    effectRan.current = false; // Allow the main data loading useEffect to run again
-    setRefreshNonce(n => n + 1); // force the load effect to re-run even if no dep changed
-    // Fresh run, fresh accounting
-    runStatsRef.current = {
-      generation: { input_tokens: 0, output_tokens: 0, ms: 0 },
-      review: { input_tokens: 0, output_tokens: 0, ms: 0 },
-    };
-
-    // Reset all state
-    setWikiStructure(undefined);
-    setCurrentPageId(undefined);
-    setGeneratedPages({});
-    setPagesInProgress(new Set());
     setError(null);
-    setEmbeddingError(false); // Reset embedding error state
-    setIsLoading(true); // Set loading state for refresh
-    setLoadingMessage(messages.loading?.initializing || 'Initializing wiki generation...');
+    setExportError(null);
+    setEmbeddingError(false);
+    setCacheMiss(false);
 
-    // Clear any in-progress requests for page content
-    activeContentRequests.clear();
-    // Reset flags related to request processing if they are component-wide
-    setStructureRequestInProgress(false); // Assuming this flag should be reset
-    setRequestInProgress(false); // Assuming this flag should be reset
+    try {
+      if (!forceRegenerate) {
+        // Submit: the selected version may already be cached — just load it
+        setIsLoading(true);
+        setLoadingMessage(messages.loading?.fetchingCache || 'Checking for cached wiki...');
+        const loaded = await refreshFromCache({ provider, model });
+        setIsLoading(false);
+        setLoadingMessage(undefined);
+        if (loaded) {
+          // Still re-attach to a running job for this version, if any
+          const job = await findActiveJob();
+          if (job) {
+            lastPagesDoneRef.current = job.progress?.pages_done ?? 0;
+            setActiveJob(job);
+          }
+          return;
+        }
+      } else {
+        // Regenerate: drop the stale view; pages reappear as the job saves them
+        setWikiStructure(undefined);
+        setGeneratedPages({});
+        setCurrentPageId(undefined);
+        setIsLoading(false);
+        setLoadingMessage(undefined);
+      }
 
-    // Explicitly trigger the data loading process again by re-invoking what the main useEffect does.
-    // This will first attempt to load from (now hopefully non-existent or soon-to-be-overwritten) server cache,
-    // then proceed to fetchRepositoryStructure if needed.
-    // To ensure fetchRepositoryStructure is called if cache is somehow still there or to force a full refresh:
-    // One option is to directly call fetchRepositoryStructure() if force refresh means bypassing cache check.
-    // For now, we rely on the standard loadData flow initiated by resetting effectRan and dependencies.
-    // This will re-trigger the main data loading useEffect.
-    // No direct call to fetchRepositoryStructure here, let the useEffect handle it based on effectRan.current = false.
-  }, [effectiveRepoInfo, language, messages.loading, activeContentRequests, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, modelExcludedDirs, modelExcludedFiles, isComprehensiveView, authCode, authRequired]);
+      const job = await enqueueJob(forceRegenerate, provider, model, newToken);
+      if (job) {
+        lastPagesDoneRef.current = forceRegenerate ? 0 : (job.progress?.pages_done ?? 0);
+        setActiveJob(job);
+        setIsLoading(false);
+        setLoadingMessage(undefined);
+      } else {
+        setError('Failed to start generation: job was not created');
+      }
+    } catch (err) {
+      console.error('Error starting generation:', err);
+      setIsLoading(false);
+      setLoadingMessage(undefined);
+      setError(err instanceof Error ? err.message : 'Failed to start generation');
+    }
+  }, [effectiveRepoInfo, language, messages.loading, selectedProviderState, selectedModelState, isComprehensiveView, authCode, authRequired, refreshFromCache, enqueueJob, findActiveJob]);
 
-  // Start wiki generation when component mounts
+  // Load the wiki when the page mounts: cache first, then attach to any
+  // running job. A cache miss with no job shows the "Generate this wiki"
+  // panel — a bare page visit never auto-generates (no token spend).
   useEffect(() => {
     if (effectRan.current === false) {
       effectRan.current = true; // Set to true immediately to prevent re-entry due to StrictMode
 
       const loadData = async () => {
-        // Try loading from server-side cache first
+        setIsLoading(true);
+        setCacheMiss(false);
         setLoadingMessage(messages.loading?.fetchingCache || 'Checking for cached wiki...');
-        try {
-          const params = new URLSearchParams({
-            owner: effectiveRepoInfo.owner,
-            repo: effectiveRepoInfo.repo,
-            repo_type: effectiveRepoInfo.type,
-            language: language,
-            comprehensive: isComprehensiveView.toString(),
-          });
-          // When a specific provider/model is selected (from URL params or the model
-          // selector), load that exact cached version; otherwise the backend returns
-          // the most recently generated one.
-          if (selectedProviderState && selectedModelState) {
-            params.append('provider', selectedProviderState);
-            params.append('model', selectedModelState);
-          }
-          const response = await fetch(`/api/wiki_cache?${params.toString()}`);
 
-          if (response.ok) {
-            const cachedData = await response.json(); // Returns null if no cache
-            if (cachedData && cachedData.wiki_structure && cachedData.generated_pages && Object.keys(cachedData.generated_pages).length > 0) {
-              console.log('Using server-cached wiki data');
-              if(cachedData.model) {
-                setSelectedModelState(cachedData.model);
-              }
-              if(cachedData.provider) {
-                setSelectedProviderState(cachedData.provider);
-              }
-              setWikiMeta({ generatedAt: cachedData.generated_at, repoCommit: cachedData.repo_commit, selfReviewed: cachedData.self_reviewed });
+        const loaded = await refreshFromCache();
 
-              // Update repoInfo
-              if(cachedData.repo) {
-                setEffectiveRepoInfo(cachedData.repo);
-              } else if (cachedData.repo_url && !effectiveRepoInfo.repoUrl) {
-                const updatedRepoInfo = { ...effectiveRepoInfo, repoUrl: cachedData.repo_url };
-                setEffectiveRepoInfo(updatedRepoInfo); // Update effective repo info state
-                console.log('Using cached repo_url:', cachedData.repo_url);
-              }
-
-              // Ensure the cached structure has sections and rootSections
-              const cachedStructure = {
-                ...cachedData.wiki_structure,
-                sections: cachedData.wiki_structure.sections || [],
-                rootSections: cachedData.wiki_structure.rootSections || []
-              };
-
-              // If sections or rootSections are missing, create intelligent ones based on page titles
-              if (!cachedStructure.sections.length || !cachedStructure.rootSections.length) {
-                const pages = cachedStructure.pages;
-                const sections: WikiSection[] = [];
-                const rootSections: string[] = [];
-
-                // Group pages by common prefixes or categories
-                const pageClusters = new Map<string, WikiPage[]>();
-
-                // Define common categories that might appear in page titles
-                const categories = [
-                  { id: 'overview', title: 'Overview', keywords: ['overview', 'introduction', 'about'] },
-                  { id: 'architecture', title: 'Architecture', keywords: ['architecture', 'structure', 'design', 'system'] },
-                  { id: 'features', title: 'Core Features', keywords: ['feature', 'functionality', 'core'] },
-                  { id: 'components', title: 'Components', keywords: ['component', 'module', 'widget'] },
-                  { id: 'api', title: 'API', keywords: ['api', 'endpoint', 'service', 'server'] },
-                  { id: 'data', title: 'Data Flow', keywords: ['data', 'flow', 'pipeline', 'storage'] },
-                  { id: 'models', title: 'Models', keywords: ['model', 'ai', 'ml', 'integration'] },
-                  { id: 'ui', title: 'User Interface', keywords: ['ui', 'interface', 'frontend', 'page'] },
-                  { id: 'setup', title: 'Setup & Configuration', keywords: ['setup', 'config', 'installation', 'deploy'] }
-                ];
-
-                // Initialize clusters with empty arrays
-                categories.forEach(category => {
-                  pageClusters.set(category.id, []);
-                });
-
-                // Add an "Other" category for pages that don't match any category
-                pageClusters.set('other', []);
-
-                // Assign pages to categories based on title keywords
-                pages.forEach((page: WikiPage) => {
-                  const title = page.title.toLowerCase();
-                  let assigned = false;
-
-                  // Try to find a matching category
-                  for (const category of categories) {
-                    if (category.keywords.some(keyword => title.includes(keyword))) {
-                      pageClusters.get(category.id)?.push(page);
-                      assigned = true;
-                      break;
-                    }
-                  }
-
-                  // If no category matched, put in "Other"
-                  if (!assigned) {
-                    pageClusters.get('other')?.push(page);
-                  }
-                });
-
-                // Create sections for non-empty categories
-                for (const [categoryId, categoryPages] of pageClusters.entries()) {
-                  if (categoryPages.length > 0) {
-                    const category = categories.find(c => c.id === categoryId) ||
-                                    { id: categoryId, title: categoryId === 'other' ? 'Other' : categoryId.charAt(0).toUpperCase() + categoryId.slice(1) };
-
-                    const sectionId = `section-${categoryId}`;
-                    sections.push({
-                      id: sectionId,
-                      title: category.title,
-                      pages: categoryPages.map((p: WikiPage) => p.id)
-                    });
-                    rootSections.push(sectionId);
-
-                    // Update page parentId
-                    categoryPages.forEach((page: WikiPage) => {
-                      page.parentId = sectionId;
-                    });
-                  }
-                }
-
-                // If we still have no sections (unlikely), fall back to importance-based grouping
-                if (sections.length === 0) {
-                  const highImportancePages = pages.filter((p: WikiPage) => p.importance === 'high').map((p: WikiPage) => p.id);
-                  const mediumImportancePages = pages.filter((p: WikiPage) => p.importance === 'medium').map((p: WikiPage) => p.id);
-                  const lowImportancePages = pages.filter((p: WikiPage) => p.importance === 'low').map((p: WikiPage) => p.id);
-
-                  if (highImportancePages.length > 0) {
-                    sections.push({
-                      id: 'section-high',
-                      title: 'Core Components',
-                      pages: highImportancePages
-                    });
-                    rootSections.push('section-high');
-                  }
-
-                  if (mediumImportancePages.length > 0) {
-                    sections.push({
-                      id: 'section-medium',
-                      title: 'Key Features',
-                      pages: mediumImportancePages
-                    });
-                    rootSections.push('section-medium');
-                  }
-
-                  if (lowImportancePages.length > 0) {
-                    sections.push({
-                      id: 'section-low',
-                      title: 'Additional Information',
-                      pages: lowImportancePages
-                    });
-                    rootSections.push('section-low');
-                  }
-                }
-
-                cachedStructure.sections = sections;
-                cachedStructure.rootSections = rootSections;
-              }
-
-              setWikiStructure(cachedStructure);
-              setGeneratedPages(cachedData.generated_pages);
-              setCurrentPageId(cachedStructure.pages.length > 0 ? cachedStructure.pages[0].id : undefined);
-              setIsLoading(false);
-              setEmbeddingError(false); 
-              setLoadingMessage(undefined);
-              cacheLoadedSuccessfully.current = true;
-              return; // Exit if cache is successfully loaded
-            } else {
-              console.log('No valid wiki data in server cache or cache is empty.');
-            }
-          } else {
-            // Log error but proceed to fetch structure, as cache is optional
-            console.error('Error fetching wiki cache from server:', response.status, await response.text());
-          }
-        } catch (error) {
-          console.error('Error loading from server cache:', error);
-          // Proceed to fetch structure if cache loading fails
+        // Re-attach to a generation that is already running for this version
+        const job = await findActiveJob();
+        if (job) {
+          lastPagesDoneRef.current = job.progress?.pages_done ?? 0;
+          setActiveJob(job);
+          setIsLoading(false);
+          setLoadingMessage(undefined);
+          return;
         }
 
-        // If we reached here, either there was no cache, it was invalid, or an error occurred
-        // Proceed to fetch repository structure
-        fetchRepositoryStructure();
+        if (loaded) {
+          setIsLoading(false);
+          setLoadingMessage(undefined);
+          return;
+        }
+
+        // No cache, no job: offer generation instead of starting one
+        setCacheMiss(true);
+        setIsLoading(false);
+        setLoadingMessage(undefined);
       };
 
       loadData();
@@ -2206,82 +835,7 @@ IMPORTANT:
     } else {
       console.log('Skipping duplicate repository fetch/cache check');
     }
-
-    // Clean up function for this effect is not strictly necessary for loadData,
-    // but keeping the main unmount cleanup in the other useEffect
-  }, [effectiveRepoInfo, effectiveRepoInfo.owner, effectiveRepoInfo.repo, effectiveRepoInfo.type, language, fetchRepositoryStructure, messages.loading?.fetchingCache, isComprehensiveView, selectedProviderState, selectedModelState, refreshNonce]);
-
-  // Save wiki to server-side cache when generation is complete
-  useEffect(() => {
-    const saveCache = async () => {
-      if (!isLoading &&
-          !error &&
-          wikiStructure &&
-          Object.keys(generatedPages).length > 0 &&
-          Object.keys(generatedPages).length >= wikiStructure.pages.length &&
-          !cacheLoadedSuccessfully.current) {
-
-        const allPagesHaveContent = wikiStructure.pages.every(page =>
-          generatedPages[page.id] && generatedPages[page.id].content && generatedPages[page.id].content !== 'Loading...');
-
-        if (allPagesHaveContent) {
-          console.log('Attempting to save wiki data to server cache via Next.js proxy');
-
-          try {
-            // Make sure wikiStructure has sections and rootSections
-            const structureToCache = {
-              ...wikiStructure,
-              sections: wikiStructure.sections || [],
-              rootSections: wikiStructure.rootSections || []
-            };
-            const dataToCache = {
-              repo: effectiveRepoInfo,
-              language: language,
-              comprehensive: isComprehensiveView,
-              wiki_structure: structureToCache,
-              generated_pages: generatedPages,
-              provider: selectedProviderState,
-              model: selectedModelState,
-              self_reviewed: isSelfReviewEnabled,
-              stats: {
-                generation: {
-                  input_tokens: runStatsRef.current.generation.input_tokens,
-                  output_tokens: runStatsRef.current.generation.output_tokens,
-                  seconds: Math.round(runStatsRef.current.generation.ms / 1000),
-                },
-                review: {
-                  input_tokens: runStatsRef.current.review.input_tokens,
-                  output_tokens: runStatsRef.current.review.output_tokens,
-                  seconds: Math.round(runStatsRef.current.review.ms / 1000),
-                },
-              },
-            };
-            const response = await fetch(`/api/wiki_cache`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify(dataToCache),
-            });
-
-            if (response.ok) {
-              console.log('Wiki data successfully saved to server cache');
-              const result = await response.json().catch(() => null);
-              if (result) {
-                setWikiMeta({ generatedAt: result.generated_at, repoCommit: result.repo_commit, selfReviewed: isSelfReviewEnabled });
-              }
-            } else {
-              console.error('Error saving wiki data to server cache:', response.status, await response.text());
-            }
-          } catch (error) {
-            console.error('Error saving to server cache:', error);
-          }
-        }
-      }
-    };
-
-    saveCache();
-  }, [isLoading, error, wikiStructure, generatedPages, effectiveRepoInfo.owner, effectiveRepoInfo.repo, effectiveRepoInfo.type, effectiveRepoInfo.repoUrl, repoUrl, language, isComprehensiveView, selectedProviderState, selectedModelState, isSelfReviewEnabled]);
+  }, [effectiveRepoInfo, effectiveRepoInfo.owner, effectiveRepoInfo.repo, effectiveRepoInfo.type, language, refreshFromCache, findActiveJob, messages.loading?.fetchingCache, isComprehensiveView, selectedProviderState, selectedModelState, refreshNonce]);
 
   const handlePageSelect = (pageId: string) => {
     if (currentPageId != pageId) {
@@ -2291,6 +845,45 @@ IMPORTANT:
 
   const [isModelSelectionModalOpen, setIsModelSelectionModalOpen] = useState(false);
   const [isReviewModalOpen, setIsReviewModalOpen] = useState(false);
+
+  // Re-enqueue after a failed/cancelled/interrupted job (fresh full run)
+  const retryJob = useCallback(async () => {
+    if (!activeJob) return;
+    const { provider, model } = activeJob;
+    setActiveJob(null);
+    setError(null);
+    try {
+      const job = await enqueueJob(false, provider, model);
+      if (job) {
+        lastPagesDoneRef.current = job.progress?.pages_done ?? 0;
+        setActiveJob(job);
+      }
+    } catch (err) {
+      console.error('Error retrying generation:', err);
+      setError(err instanceof Error ? err.message : 'Failed to retry generation');
+    }
+  }, [activeJob, enqueueJob]);
+
+  // Enqueue for the current selection (the cache-miss "Generate" button)
+  const startGeneration = useCallback(async () => {
+    setError(null);
+    setCacheMiss(false);
+    try {
+      const job = await enqueueJob(false);
+      if (job) {
+        lastPagesDoneRef.current = job.progress?.pages_done ?? 0;
+        setActiveJob(job);
+      }
+    } catch (err) {
+      console.error('Error starting generation:', err);
+      setCacheMiss(true);
+      setError(err instanceof Error ? err.message : 'Failed to start generation');
+    }
+  }, [enqueueJob]);
+
+  const jobElapsedSeconds = activeJob?.started_at
+    ? Math.max(0, Math.round((Date.now() - new Date(activeJob.started_at).getTime()) / 1000))
+    : 0;
 
   return (
     <div className="h-screen paper-texture p-4 md:p-8 flex flex-col">
@@ -2307,6 +900,75 @@ IMPORTANT:
       </header>
 
       <main className="flex-1 max-w-[90%] xl:max-w-[1400px] mx-auto overflow-y-auto">
+        {/* Server-side generation progress panel */}
+        {!isLoading && activeJob && (
+          <div className="p-4 mb-4 bg-[var(--card-bg)] rounded-lg shadow-custom card-japanese">
+            {JOB_ACTIVE_STATUSES.includes(activeJob.status) ? (
+              <div>
+                <div className="flex items-center justify-between gap-4 mb-2">
+                  <p className="text-sm text-[var(--foreground)] font-serif">
+                    {activeJob.status === 'queued'
+                      ? 'Queued for generation on the server...'
+                      : `Generating wiki — ${activeJob.progress.phase}`}
+                    {activeJob.progress.pages_total > 0 &&
+                      ` · ${activeJob.progress.pages_done}/${activeJob.progress.pages_total} pages`}
+                    {jobElapsedSeconds > 0 && ` · ${Math.floor(jobElapsedSeconds / 60)}m ${jobElapsedSeconds % 60}s`}
+                  </p>
+                  <button
+                    onClick={cancelActiveJob}
+                    className="text-xs px-3 py-1.5 bg-[var(--background)] text-[var(--foreground)] rounded-md hover:bg-[var(--background)]/80 border border-[var(--border-color)] transition-colors hover:cursor-pointer flex-shrink-0"
+                  >
+                    {messages.common?.cancel || 'Cancel'}
+                  </button>
+                </div>
+                <div className="bg-[var(--background)]/50 rounded-full h-2 mb-2 overflow-hidden border border-[var(--border-color)]">
+                  <div
+                    className="bg-[var(--accent-primary)] h-2 rounded-full transition-all duration-300 ease-in-out"
+                    style={{
+                      width: activeJob.progress.pages_total > 0
+                        ? `${Math.max(5, 100 * activeJob.progress.pages_done / activeJob.progress.pages_total)}%`
+                        : '5%'
+                    }}
+                  />
+                </div>
+                <p className="text-xs text-[var(--muted)]">
+                  {activeJob.progress.current_page_title
+                    ? `Writing: ${activeJob.progress.current_page_title}`
+                    : 'Pages appear below as they are generated — you can leave this page; generation continues on the server.'}
+                </p>
+              </div>
+            ) : (
+              <div>
+                <div className="flex items-center text-[var(--highlight)] mb-2">
+                  <FaExclamationTriangle className="mr-2" />
+                  <span className="font-bold font-serif text-sm">
+                    {activeJob.status === 'failed' ? 'Generation failed'
+                      : activeJob.status === 'cancelled' ? 'Generation cancelled'
+                      : 'Generation interrupted by a server restart'}
+                  </span>
+                </div>
+                {activeJob.error && (
+                  <p className="text-[var(--foreground)] text-xs mb-3 break-words">{activeJob.error}</p>
+                )}
+                <p className="text-[var(--muted)] text-xs mb-3">
+                  Pages generated before the stop are shown below (if any). Retry runs a fresh generation job.
+                </p>
+                <div className="flex gap-2">
+                  <button onClick={retryJob} className="btn-japanese text-xs px-4 py-1.5 rounded-md">
+                    {messages.common?.retry || 'Retry'}
+                  </button>
+                  <button
+                    onClick={() => setActiveJob(null)}
+                    className="text-xs px-4 py-1.5 bg-[var(--background)] text-[var(--foreground)] rounded-md hover:bg-[var(--background)]/80 border border-[var(--border-color)] transition-colors"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {isLoading ? (
           <div className="flex flex-col items-center justify-center p-8 bg-[var(--card-bg)] rounded-lg shadow-custom card-japanese">
             <div className="relative mb-6">
@@ -2321,53 +983,6 @@ IMPORTANT:
               {loadingMessage || messages.common?.loading || 'Loading...'}
               {isExporting && (messages.loading?.preparingDownload || ' Please wait while we prepare your download...')}
             </p>
-
-            {/* Progress bar for page generation */}
-            {wikiStructure && (
-              <div className="w-full max-w-md mt-3">
-                <div className="bg-[var(--background)]/50 rounded-full h-2 mb-3 overflow-hidden border border-[var(--border-color)]">
-                  <div
-                    className="bg-[var(--accent-primary)] h-2 rounded-full transition-all duration-300 ease-in-out"
-                    style={{
-                      width: `${Math.max(5, 100 * (wikiStructure.pages.length - pagesInProgress.size) / wikiStructure.pages.length)}%`
-                    }}
-                  />
-                </div>
-                <p className="text-xs text-[var(--muted)] text-center">
-                  {language === 'ja'
-                    ? `${wikiStructure.pages.length}ページ中${wikiStructure.pages.length - pagesInProgress.size}ページ完了`
-                    : messages.repoPage?.pagesCompleted
-                        ? messages.repoPage.pagesCompleted
-                            .replace('{completed}', (wikiStructure.pages.length - pagesInProgress.size).toString())
-                            .replace('{total}', wikiStructure.pages.length.toString())
-                        : `${wikiStructure.pages.length - pagesInProgress.size} of ${wikiStructure.pages.length} pages completed`}
-                </p>
-
-                {/* Show list of in-progress pages */}
-                {pagesInProgress.size > 0 && (
-                  <div className="mt-4 text-xs">
-                    <p className="text-[var(--muted)] mb-2">
-                      {messages.repoPage?.currentlyProcessing || 'Currently processing:'}
-                    </p>
-                    <ul className="text-[var(--foreground)] space-y-1">
-                      {Array.from(pagesInProgress).slice(0, 3).map(pageId => {
-                        const page = wikiStructure.pages.find(p => p.id === pageId);
-                        return page ? <li key={pageId} className="truncate border-l-2 border-[var(--accent-primary)]/30 pl-2">{page.title}</li> : null;
-                      })}
-                      {pagesInProgress.size > 3 && (
-                        <li className="text-[var(--muted)]">
-                          {language === 'ja'
-                            ? `...他に${pagesInProgress.size - 3}ページ`
-                            : messages.repoPage?.andMorePages
-                                ? messages.repoPage.andMorePages.replace('{count}', (pagesInProgress.size - 3).toString())
-                                : `...and ${pagesInProgress.size - 3} more`}
-                        </li>
-                      )}
-                    </ul>
-                  </div>
-                )}
-              </div>
-            )}
           </div>
         ) : error ? (
           <div className="bg-[var(--highlight)]/5 border border-[var(--highlight)]/30 rounded-lg p-5 mb-4 shadow-sm">
@@ -2564,6 +1179,25 @@ IMPORTANT:
                 </div>
               )}
             </div>
+          </div>
+        ) : cacheMiss && !activeJob ? (
+          /* Cache miss with no running job: offer generation, never auto-spend */
+          <div className="flex flex-col items-center justify-center p-8 bg-[var(--card-bg)] rounded-lg shadow-custom card-japanese">
+            <div className="relative mb-4">
+              <div className="absolute -inset-2 bg-[var(--accent-primary)]/5 rounded-full blur-md"></div>
+              <FaBookOpen className="text-4xl relative z-10 text-[var(--muted)]" />
+            </div>
+            <p className="font-serif text-[var(--foreground)] mb-2">
+              No wiki has been generated for {effectiveRepoInfo.owner}/{effectiveRepoInfo.repo}
+              {selectedProviderState && selectedModelState ? ` with ${selectedProviderState}/${selectedModelState}` : ''} yet.
+            </p>
+            <p className="text-xs text-[var(--muted)] mb-5">
+              Generation runs on the server and can take a while; you can navigate away and come back.
+            </p>
+            <button onClick={startGeneration} className="btn-japanese px-5 py-2 inline-flex items-center gap-1.5">
+              <FaSync className="text-sm" />
+              Generate this wiki
+            </button>
           </div>
         ) : null}
       </main>

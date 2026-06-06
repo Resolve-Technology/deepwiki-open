@@ -278,7 +278,7 @@ export default function ModelSelectionModal({
               <button
                 type="button"
                 onClick={handleForceRegenerate}
-                title={t.form?.regenerateTooltip || 'Discard this model\'s saved wiki and generate it again'}
+                title={t.form?.regenerateTooltip || 'Discard this model\'s saved wiki and generate it again on the server'}
                 className="px-4 py-2 text-sm font-medium rounded-md border border-[var(--accent-primary)]/50 text-[var(--accent-primary)] bg-transparent hover:bg-[var(--accent-primary)]/10 transition-colors"
               >
                 {t.form?.regenerate || 'Regenerate'}

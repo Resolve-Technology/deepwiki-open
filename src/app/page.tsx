@@ -391,6 +391,70 @@ export default function Home() {
 
     const queryString = params.toString() ? `?${params.toString()}` : '';
 
+    // Generation now runs server-side: enqueue a job (only when no cached wiki
+    // exists for this version — opening an already-generated wiki must not
+    // re-spend tokens), then navigate; the wiki page attaches to the job and
+    // polls its progress. A 409 means a job is already running — just navigate.
+    const repoType = (type === 'local' ? type : selectedPlatform) || 'github';
+    try {
+      let hasCache = false;
+      try {
+        const cacheParams = new URLSearchParams({
+          owner, repo, repo_type: repoType, language: selectedLanguage,
+          provider, model,
+        });
+        const cacheResponse = await fetch(`/api/wiki_cache?${cacheParams.toString()}`);
+        if (cacheResponse.ok) {
+          const cached = await cacheResponse.json();
+          hasCache = !!(cached && cached.wiki_structure && cached.generated_pages
+            && Object.keys(cached.generated_pages).length > 0);
+        }
+      } catch (err) {
+        console.warn('Cache check failed, proceeding to enqueue:', err);
+      }
+
+      if (!hasCache) {
+        const jobResponse = await fetch('/api/wiki_jobs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            repo: {
+              owner,
+              repo,
+              type: repoType,
+              token: accessToken || null,
+              localPath: localPath || null,
+              repoUrl: localPath ? null : repositoryInput,
+            },
+            language: selectedLanguage,
+            provider,
+            model,
+            comprehensive: isComprehensiveView,
+            self_review: isSelfReviewEnabled,
+            force_regenerate: false,
+            excluded_dirs: excludedDirs || undefined,
+            excluded_files: excludedFiles || undefined,
+            included_dirs: includedDirs || undefined,
+            included_files: includedFiles || undefined,
+            authorization_code: authCode || undefined,
+          }),
+        });
+        if (!jobResponse.ok && jobResponse.status !== 409) {
+          const errorText = await jobResponse.text().catch(() => 'No error details available');
+          setError(`Failed to start generation (${jobResponse.status}): ${errorText}`);
+          setIsSubmitting(false);
+          setIsConfigModalOpen(false);
+          return;
+        }
+      }
+    } catch (err) {
+      console.error('Error enqueueing generation job:', err);
+      setError(err instanceof Error ? err.message : 'Failed to start generation');
+      setIsSubmitting(false);
+      setIsConfigModalOpen(false);
+      return;
+    }
+
     // Navigate to the dynamic route
     router.push(`/${owner}/${repo}${queryString}`);
 
