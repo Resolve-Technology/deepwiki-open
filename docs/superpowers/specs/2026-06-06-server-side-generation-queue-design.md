@@ -39,20 +39,40 @@ ConfigurationModal / Refresh modal           Home page                Wiki page
 │ api/wiki_generator.py  run_job():                                              │
 │   1. (force?) delete target cache version                                      │
 │   2. prepare_retriever (clone + embeddings — already persistent)               │
-│   3. structure prompt → LLM → parse <wiki_structure> XML (3 retries)           │
-│   4. for each page: RAG retrieve → page prompt → LLM                           │
-│        └ self_review? → review prompt (+ rag) → corrected page                 │
+│   3. file tree + README via provider API (ported fetch; local → dir walk)      │
+│   4. structure prompt → assemble envelope → LLM → parse XML (3 retries)        │
+│   5. for each page: page prompt → assemble envelope → LLM                      │
+│        │  (NO RAG retrieval here — matches today: generation prompts exceed    │
+│        │   the 8000-token gate and run without retrieval; deep-dive pages      │
+│        │   inject file content via get_file_content like the websocket does)   │
+│        └ self_review? → review prompt + RAG retrieval (buildPageRagQuery       │
+│        │   semantics — review IS retrieval-grounded today) → corrected page    │
 │        └ save_wiki_cache(partial pages + stats)   ← INCREMENTAL                │
-│   5. final save (self_reviewed flag, stats, generated_at, repo_commit)         │
+│   6. final save (self_reviewed flag, stats, generated_at, repo_commit)         │
 │                                                                                │
-│ api/wiki_prompts.py    structure / standard-page / deep-dive prompts           │
-│                        (ported verbatim from page.tsx) + self-review prompts   │
-│                        (ported from wikiRevision.ts)                           │
+│ api/wiki_prompts.py    structure / standard-page / deep-dive / self-review     │
+│                        prompts + file-URL builder + page rag query             │
+│                        (ported verbatim from page.tsx / wikiRevision.ts)       │
+│ api/prompt_assembly.py the websocket chat path's FULL prompt envelope          │
+│                        ("/no_think {analyst system prompt} ... <query>…        │
+│                        Assistant: "), context formatting, prompt_fit budget —  │
+│                        extracted so engine output is byte-equivalent to the    │
+│                        prompts today's flow sends                              │
+│ api/repo_tree.py       file tree + README fetch (GitHub/GitLab/Bitbucket REST  │
+│                        APIs, ported from page.tsx; local → directory walk)     │
 │ api/llm_dispatch.py    provider dispatch (claude native, vllm w/ discovery     │
-│                        route, others) → (text, usage); context formatting      │
-│                        helpers shared with the websocket chat path             │
+│                        route) → (text, usage)                                  │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Prompt fidelity (the load-bearing correction from plan review):** today's LLM input is a
+*double wrapper* — the websocket handler wraps the frontend's page/structure prompt in its
+own code-analyst system prompt and envelope (`/no_think {system} [context|note] <query>
+{page prompt} </query>\n\nAssistant: `), and **generation runs without RAG retrieval**
+(the prompts exceed the 8000-token gate and send no `rag_query`); only the **self-review**
+pass retrieves (it sends `rag_query`). The engine replicates this exactly rather than
+"improving" it — byte-equivalent prompts are an explicit acceptance criterion, enforced by
+parity tests against expected envelopes.
 
 ### Job model & API
 
@@ -96,7 +116,9 @@ interactive Ask/review flows). Stats accumulate per phase exactly as today.
 - **Wiki page**: when a job is active for the loaded (repo, version), show a progress
   panel (phase, page x/y, current title, elapsed) polling `GET /api/wiki_jobs/{id}`;
   re-fetch the wiki cache whenever `pages_done` changes so finished pages render
-  incrementally. When no job is active: today's viewer behavior.
+  incrementally. When no job is active: today's viewer behavior. **Cache miss with no
+  active job** (old bookmark, direct URL): show a "Generate this wiki" button that
+  enqueues — never auto-spend tokens on a bare page visit.
 - **Home page**: `JobsPanel` listing queued/running jobs with progress bars and cancel
   buttons — this is where multi-repo parallelism is visible and managed.
 - **Removed from page.tsx**: `determineWikiStructure`, `generatePageContent`, the
