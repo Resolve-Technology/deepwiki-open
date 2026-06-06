@@ -10,12 +10,14 @@ Configuration (env):
     VLLM_SCAN_PORTS=8000-8010                        # range ("a-b") and/or list
     VLLM_API_BASE_URL=http://192.168.96.135:8005     # fallback when scan vars unset
     VLLM_EMBEDDER_MODEL=BAAI/bge-m3                  # excluded from chat dropdown
+    VLLM_SCAN_EXCLUDE=*OCR*,*ASR*                    # glob patterns, case-insensitive
 
 Probes run concurrently with a short timeout; results are cached for a minute
 and the last good inventory is kept when servers are temporarily unreachable.
 """
 
 import asyncio
+import fnmatch
 import logging
 import os
 import time
@@ -94,11 +96,22 @@ def _probe(base_url: str) -> Tuple[str, List[str]]:
         return base_url, []
 
 
+def _excluded_by_pattern(model_id: str) -> bool:
+    """True when the model matches a VLLM_SCAN_EXCLUDE glob (case-insensitive).
+
+    Lets non-chat models (OCR, ASR, ...) that happen to be served stay out of
+    the wiki-generation dropdown.
+    """
+    patterns = [p.strip() for p in os.getenv("VLLM_SCAN_EXCLUDE", "").split(",") if p.strip()]
+    lowered = model_id.lower()
+    return any(fnmatch.fnmatch(lowered, pattern.lower()) for pattern in patterns)
+
+
 def build_inventory(results: List[Tuple[str, List[str]]]) -> Tuple[List[str], Dict[str, str]]:
     """Merges per-server results into (ordered model ids, model -> base_url).
 
-    The first server that serves a model wins; the embedder's model is excluded
-    from the chat dropdown (it can't do completions).
+    The first server that serves a model wins; the embedder's model and
+    VLLM_SCAN_EXCLUDE matches are excluded from the chat dropdown.
     """
     embedder_model = os.getenv("VLLM_EMBEDDER_MODEL", "").strip()
     models: List[str] = []
@@ -106,6 +119,8 @@ def build_inventory(results: List[Tuple[str, List[str]]]) -> Tuple[List[str], Di
     for base_url, ids in results:
         for model_id in ids:
             if embedder_model and model_id == embedder_model:
+                continue
+            if _excluded_by_pattern(model_id):
                 continue
             if model_id in routes:
                 if routes[model_id] != base_url:

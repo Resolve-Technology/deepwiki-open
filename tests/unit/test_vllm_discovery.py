@@ -55,3 +55,23 @@ def test_build_inventory_dedupes_and_excludes_embedder(monkeypatch):
         "google/gemma-4-26B-A4B-it": "http://h1:8005/v1",
         "Qwen/Qwen3-32B": "http://h2:8005/v1",
     }
+
+
+def test_build_inventory_excludes_scan_patterns(monkeypatch):
+    monkeypatch.delenv("VLLM_EMBEDDER_MODEL", raising=False)
+    monkeypatch.setenv("VLLM_SCAN_EXCLUDE", "*OCR*,*ASR*")
+    results = [
+        ("http://h1:8001/v1", ["nvidia/Qwen3.6-35B-A3B-NVFP4"]),
+        ("http://h1:8004/v1", ["PaddleOCR-VL-1.5-0.9B"]),   # *OCR* -> excluded
+        ("http://h2:8000/v1", ["Qwen/Qwen3-ASR-1.7B"]),     # *ASR* -> excluded
+    ]
+    models, routes = build_inventory(results)
+    assert models == ["nvidia/Qwen3.6-35B-A3B-NVFP4"]
+    assert routes == {"nvidia/Qwen3.6-35B-A3B-NVFP4": "http://h1:8001/v1"}
+
+
+def test_exclude_patterns_are_case_insensitive(monkeypatch):
+    monkeypatch.delenv("VLLM_EMBEDDER_MODEL", raising=False)
+    monkeypatch.setenv("VLLM_SCAN_EXCLUDE", "*ocr*")
+    models, _ = build_inventory([("http://h:1/v1", ["Some-OCR-Model", "chat-model"])])
+    assert models == ["chat-model"]
