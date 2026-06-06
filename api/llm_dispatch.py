@@ -12,7 +12,7 @@ from adalflow.core.types import ModelType
 from api.anthropic_client import AnthropicClient
 from api.config import get_model_config
 from api.vllm_client import VLLMClient
-from api.vllm_discovery import get_vllm_route
+from api.vllm_discovery import get_vllm_models, get_vllm_route
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,12 @@ async def generate(provider: str, model: str, prompt: str) -> LLMResult:
 
     if provider == "vllm":
         route = get_vllm_route(model)
+        if route is None:
+            # The route cache is cold (server restart) or stale — in the
+            # browser flow the model dropdown's /models/config call populated
+            # it; server-side jobs must refresh it themselves.
+            await get_vllm_models()
+            route = get_vllm_route(model)
         logger.info(f"Dispatching to vLLM model: {model} via {route or 'default base URL'}")
         client = VLLMClient(base_url=route) if route else VLLMClient()
         model_kwargs = {

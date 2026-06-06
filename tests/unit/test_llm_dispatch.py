@@ -109,6 +109,12 @@ def test_vllm_branch_with_route(monkeypatch):
 def test_vllm_branch_without_route(monkeypatch):
     monkeypatch.setattr(llm_dispatch, "VLLMClient", FakeClient)
     monkeypatch.setattr(llm_dispatch, "get_vllm_route", lambda model: None)
+    scans = []
+
+    async def fake_scan():
+        scans.append(True)
+        return []
+    monkeypatch.setattr(llm_dispatch, "get_vllm_models", fake_scan)
     monkeypatch.setattr(llm_dispatch, "get_model_config",
                         lambda p, m: {"model_kwargs": {"temperature": 0.5}})
     FakeClient._usage = None
@@ -116,10 +122,26 @@ def test_vllm_branch_without_route(monkeypatch):
     result = run(generate("vllm", "gemma", "P"))
 
     assert result.text == "Hello world"
+    assert scans == [True]  # a route miss triggers a discovery refresh
     client = FakeClient.instances[0]
     assert client.init_kwargs == {}  # default base URL
     assert client.seen["model_kwargs"] == {
         "model": "gemma", "stream": True, "temperature": 0.5}  # no top_p
+
+
+def test_vllm_route_found_after_refresh(monkeypatch):
+    monkeypatch.setattr(llm_dispatch, "VLLMClient", FakeClient)
+    routes = iter([None, "http://10.0.0.9:8001"])
+    monkeypatch.setattr(llm_dispatch, "get_vllm_route", lambda model: next(routes))
+
+    async def fake_scan():
+        return ["gemma"]
+    monkeypatch.setattr(llm_dispatch, "get_vllm_models", fake_scan)
+    FakeClient._usage = None
+
+    run(generate("vllm", "gemma", "P"))
+
+    assert FakeClient.instances[0].init_kwargs == {"base_url": "http://10.0.0.9:8001"}
 
 
 def test_unsupported_provider():
