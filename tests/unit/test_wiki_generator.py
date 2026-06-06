@@ -225,10 +225,13 @@ def test_self_review_dispatch_failure_keeps_page(tmp_path):
     assert job.progress.phase == "done"
 
 
-# --- prompt-envelope parity (review findings C1/C2) ----------------------------
+# --- prompt-envelope parity (websocket retrieval gate) -------------------------
 
 
-def test_generation_is_retrieval_free_and_review_is_grounded():
+def test_generation_under_token_gate_is_retrieval_grounded():
+    # The websocket retrieves whenever the message is <= 8000 tokens — these
+    # small prompts all fall under the gate, so structure AND page prompts
+    # carry RAG context, exactly like the browser flow did.
     job = make_job(self_review=True)
     dispatch = FakeDispatch([STRUCTURE_XML] + [PAGE_BODY, "NO_CHANGES"] * 3)
 
@@ -243,28 +246,58 @@ def test_generation_is_retrieval_free_and_review_is_grounded():
         assert p.startswith("/no_think <role>\nYou are an expert code analyst examining the github repository:")
         assert p.endswith("</query>\n\nAssistant: ")
         assert "<query>\n" in p
-
-    # Generation (structure + pages) runs with NO retrieval
-    for p in [structure_prompt] + page_prompts:
-        assert "<note>Answering without retrieval augmentation.</note>" in p
-        assert "<START_OF_CONTEXT>" not in p
+        # All under the 8000-token gate -> retrieval-grounded
+        assert "<START_OF_CONTEXT>" in p
+        assert "retrieved grounding snippet" in p
 
     # The frontend prompt is embedded inside <query>...</query>
     assert "Return ONLY the valid XML structure" in structure_prompt
     assert "a H1 Markdown heading: `# Page One`" in page_prompts[0]
     assert "expert technical writer and software architect" in page_prompts[0]
 
-    # Self-review IS retrieval-grounded
     for p in review_prompts:
-        assert "<START_OF_CONTEXT>" in p
-        assert "retrieved grounding snippet" in p
         assert "NO_CHANGES" in p
 
-    # RAG was prepared with the repo URL and token, queried per page
+    # RAG was prepared with the repo URL and token; queried for the structure
+    # call + each page's generation + each page's review
     rag = FakeRAG.instances[0]
     assert rag.prepare_args[0] == "https://github.com/o/r"
     assert rag.prepare_args[2] == "secret-token"
-    assert len(rag.queries) == 3
+    assert len(rag.queries) == 7
+    # Standard pages use the message itself as the retrieval query
+    assert any("expert technical writer" in q for q, _ in rag.queries)
+
+
+def test_structure_over_token_gate_skips_retrieval(monkeypatch):
+    # A big file tree pushes the structure prompt over 8000 tokens -> no RAG
+    async def big_tree(repo):
+        return "\n".join(f"src/module_{i}/file_{i}.py" for i in range(8000)), "# Readme"
+    monkeypatch.setattr(wiki_generator, "fetch_repo_tree", big_tree)
+
+    job = make_job(self_review=False)
+    dispatch = FakeDispatch([STRUCTURE_XML] + [PAGE_BODY] * 3)
+    run(run_generation(job, dispatch))
+
+    structure_prompt = dispatch.prompts[0]
+    assert "<note>Answering without retrieval augmentation.</note>" in structure_prompt
+    assert "<START_OF_CONTEXT>" not in structure_prompt
+    # Page prompts stay small -> still grounded
+    assert "<START_OF_CONTEXT>" in dispatch.prompts[1]
+
+
+def test_retrieval_failure_continues_without_context(monkeypatch):
+    class ExplodingRAG(FakeRAG):
+        def __call__(self, query, language=None):
+            raise RuntimeError("embedder down")
+    monkeypatch.setattr(wiki_generator, "RAG", ExplodingRAG)
+
+    job = make_job(self_review=False)
+    dispatch = FakeDispatch([STRUCTURE_XML] + [PAGE_BODY] * 3)
+    run(run_generation(job, dispatch))  # must not raise
+
+    for p in dispatch.prompts:
+        assert "<note>Answering without retrieval augmentation.</note>" in p
+    assert job.progress.phase == "done"
 
 
 def test_deep_dive_file_injection(monkeypatch):
@@ -283,6 +316,8 @@ def test_deep_dive_file_injection(monkeypatch):
     for p in (gen_prompt, review_prompt):  # file content carries into review too
         assert '<currentFileContent path="prog.cbl">\nCOBOL SOURCE LINES\n</currentFileContent>' in p
     assert "senior mainframe/COBOL systems analyst" in gen_prompt
+    # Deep-dive generation retrieval uses the filePath-focused query
+    assert ("Contexts related to prog.cbl", "en") in FakeRAG.instances[0].queries
 
 
 def test_deep_dive_file_fetch_failure_proceeds(monkeypatch):

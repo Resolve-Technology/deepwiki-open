@@ -6,9 +6,12 @@ and save the wiki cache incrementally after every page so partial runs survive.
 
 Prompt fidelity is the acceptance criterion: every dispatch sends the SAME
 double-wrapped envelope today's websocket flow sends — the code-analyst system
-prompt around the frontend-ported page/structure prompt, retrieval-FREE for
-generation (the envelope carries the no-RAG note) and retrieval-grounded only
-for the self-review pass. Do not "improve" this without changing the tests.
+prompt around the frontend-ported page/structure prompt. Retrieval follows the
+websocket's 8000-token gate: messages at or under it retrieve (standard page
+prompts, small-repo structure prompts; deep-dives use a filePath-focused
+query), oversized messages go without (the envelope carries the no-RAG note);
+self-review always retrieves via its explicit rag_query. Do not "improve"
+this without changing the tests.
 """
 import asyncio
 import logging
@@ -22,7 +25,7 @@ from urllib.parse import unquote
 
 from api.api import (RepoInfo, WikiCacheRequest, WikiPage, WikiStructureModel,
                      get_wiki_cache_path, save_wiki_cache)
-from api.data_pipeline import get_file_content
+from api.data_pipeline import count_tokens, get_file_content
 from api.prompt_assembly import (assemble_envelope, format_context_text,
                                  select_generation_system_prompt)
 from api.rag import RAG
@@ -200,6 +203,31 @@ async def run_generation(
         phase_stats.output_tokens += result.output_tokens
         return result.text
 
+    async def retrieve_for_generation(inner_prompt: str,
+                                      file_path: str = "") -> str:
+        """The websocket's retrieval gate, replicated for generation calls.
+
+        The websocket retrieves whenever the message is <= 8000 tokens (so
+        standard page prompts DID get RAG context in the browser flow — only
+        oversized messages like big structure prompts went without). The
+        retrieval query mirrors its fallback chain: a filePath-focused query
+        when filePath is set (deep-dive pages), else the message itself.
+        """
+        tokens = count_tokens(inner_prompt,
+                              is_ollama_embedder=(job.provider == "ollama"))
+        logger.info(f"Request size: {tokens} tokens")
+        if tokens > 8000:
+            logger.warning(f"Request exceeds recommended token limit ({tokens} > 7500)")
+            return ""
+        rag_query = f"Contexts related to {file_path}" if file_path else inner_prompt
+        try:
+            retrieved = await asyncio.to_thread(rag, rag_query, language=job.language)
+            return format_context_text(retrieved)
+        except Exception as e:
+            # Continue without RAG if there's an error (websocket behavior)
+            logger.error(f"Error in RAG retrieval: {str(e)}")
+            return ""
+
     async def save_partial(generated: Dict[str, Dict[str, Any]],
                            structure: Dict[str, Any]) -> None:
         request = WikiCacheRequest(
@@ -261,7 +289,11 @@ async def run_generation(
     # response that parses badly also consumes an attempt (fresh dispatch).
     structure_inner = build_structure_prompt(
         file_tree, readme, repo.owner, repo.repo, job.language, job.comprehensive)
+    # Big structure prompts (full file tree) exceed the 8000-token gate and go
+    # without retrieval; small repos fall under it and retrieve, like today.
+    structure_context = await retrieve_for_generation(structure_inner)
     structure_prompt = assemble_envelope(system_prompt, structure_inner,
+                                         context_text=structure_context,
                                          provider=job.provider)
     structure: Optional[Dict[str, Any]] = None
     last_parse_error: Optional[GenerationError] = None
@@ -319,17 +351,24 @@ async def run_generation(
             # Deep-dive pages get the full program source injected — the same
             # provider-API fetch the websocket does for request.filePath (it
             # raises for local repos; proceed without injection, like today).
+            requested_file_path = ""
             if is_deep_dive and page["filePaths"]:
-                file_path = page["filePaths"][0]
+                requested_file_path = page["filePaths"][0]
+                file_path = requested_file_path
                 try:
                     file_content = await asyncio.to_thread(
                         get_file_content, repo_url, file_path, repo.type, repo.token)
                 except Exception as e:
                     logger.error(f"Error retrieving file content: {str(e)}")
                     file_content, file_path = "", ""
-            # Generation is retrieval-free (no context_text), exactly as today
+            # Page prompts are usually under the 8000-token gate, so the
+            # browser flow retrieved for them (filePath-focused query on
+            # deep-dives, the message itself otherwise) — reproduce that.
+            page_context = await retrieve_for_generation(
+                page_inner, file_path=requested_file_path)
             prompt = assemble_envelope(system_prompt, page_inner,
                                        file_content=file_content, file_path=file_path,
+                                       context_text=page_context,
                                        provider=job.provider)
             content = await timed_dispatch(prompt, stats_generation)
             # Clean up markdown delimiters (same regexes as generatePageContent)
