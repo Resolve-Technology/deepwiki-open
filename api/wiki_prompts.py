@@ -231,7 +231,7 @@ def build_structure_prompt(file_tree: str, readme: str, owner: str, repo: str,
         "- Class hierarchies\n"
         "\n"
         + body_section +
-        "\n"
+        "\n\n"
         "IMPORTANT FORMATTING INSTRUCTIONS:\n"
         "- Return ONLY the valid XML structure specified above\n"
         "- DO NOT wrap the XML in markdown code blocks (no ``` or ```xml)\n"
