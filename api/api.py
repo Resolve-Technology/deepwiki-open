@@ -778,6 +778,94 @@ async def store_wiki_review(review: WikiReviewData):
         logger.error(f"Error saving wiki review to {review_path}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to save wiki review")
 
+# --- Wiki Generation Job Endpoints ---
+# NOTE: api.wiki_jobs imports back into this module (wiki_jobs ->
+# wiki_generator -> api.api), so it must be imported lazily inside the
+# endpoint functions, never at module level.
+
+class WikiJobRequest(BaseModel):
+    """Request body for enqueueing a server-side wiki generation job."""
+    repo: RepoInfo
+    language: str = "en"
+    provider: str
+    model: str
+    comprehensive: bool = True
+    self_review: bool = True
+    force_regenerate: bool = False
+    excluded_dirs: Optional[str] = None
+    excluded_files: Optional[str] = None
+    included_dirs: Optional[str] = None
+    included_files: Optional[str] = None
+    authorization_code: Optional[str] = None
+
+@app.post("/api/wiki_jobs")
+async def create_wiki_job(request: WikiJobRequest):
+    """Enqueue a wiki generation job. 409 if one is already queued/running
+    for the same repo/version, 429 when the queue is full."""
+    supported_langs = configs["lang_config"]["supported_languages"]
+    if request.language not in supported_langs:
+        raise HTTPException(status_code=400, detail="Language is not supported")
+
+    if WIKI_AUTH_MODE:
+        logger.info("check the authorization code")
+        if not request.authorization_code or WIKI_AUTH_CODE != request.authorization_code:
+            raise HTTPException(status_code=401, detail="Authorization code is invalid")
+
+    from api.wiki_jobs import DuplicateJob, QueueFull, WikiJob, get_manager
+    job = WikiJob(
+        repo=request.repo,
+        language=request.language,
+        provider=request.provider,
+        model=request.model,
+        comprehensive=request.comprehensive,
+        self_review=request.self_review,
+        force_regenerate=request.force_regenerate,
+        excluded_dirs=request.excluded_dirs,
+        excluded_files=request.excluded_files,
+        included_dirs=request.included_dirs,
+        included_files=request.included_files,
+    )
+    try:
+        get_manager().submit(job)
+    except DuplicateJob as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except QueueFull as e:
+        raise HTTPException(status_code=429, detail=str(e))
+    return {"job_id": job.id}
+
+@app.get("/api/wiki_jobs")
+async def list_wiki_jobs():
+    """All known jobs (active first in insertion order), tokens never included."""
+    from api.wiki_jobs import get_manager
+    return {"jobs": [job.to_public_dict()
+                     for job in get_manager().list_jobs()]}
+
+@app.get("/api/wiki_jobs/{job_id}")
+async def get_wiki_job(job_id: str):
+    from api.wiki_jobs import get_manager
+    job = get_manager().get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job.to_public_dict()
+
+@app.post("/api/wiki_jobs/{job_id}/cancel")
+async def cancel_wiki_job(job_id: str, authorization_code: Optional[str] = Query(None, description="Authorization code")):
+    """Request cancellation of a queued/running job (same auth gate as DELETE)."""
+    if WIKI_AUTH_MODE:
+        logger.info("check the authorization code")
+        if not authorization_code or WIKI_AUTH_CODE != authorization_code:
+            raise HTTPException(status_code=401, detail="Authorization code is invalid")
+    from api.wiki_jobs import get_manager
+    job = get_manager().cancel(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"status": job.status}
+
+@app.on_event("startup")
+async def start_wiki_job_workers():
+    from api.wiki_jobs import get_manager
+    get_manager().start()
+
 @app.get("/api/wiki_review", response_model=List[WikiReviewData])
 async def get_wiki_reviews(
     owner: str = Query(..., description="Repository owner"),

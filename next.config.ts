@@ -52,6 +52,14 @@ const nextConfig: NextConfig = {
         destination: `${TARGET_SERVER_BASE_URL}/api/wiki_review`,
       },
       {
+        source: '/api/wiki_jobs/:path*',
+        destination: `${TARGET_SERVER_BASE_URL}/api/wiki_jobs/:path*`,
+      },
+      {
+        source: '/api/wiki_jobs',
+        destination: `${TARGET_SERVER_BASE_URL}/api/wiki_jobs`,
+      },
+      {
         source: '/local_repo/structure',
         destination: `${TARGET_SERVER_BASE_URL}/local_repo/structure`,
       },
