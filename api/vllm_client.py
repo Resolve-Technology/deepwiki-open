@@ -75,6 +75,9 @@ class VLLMClient(OpenAIClient):
             env_base_url_name=env_base_url_name,
             env_api_key_name=env_api_key_name,
         )
+        # Usage of the most recent stream, for non-streaming consumers
+        # (api/llm_dispatch.py); the websocket path ignores it.
+        self.last_usage = None
 
     def convert_inputs_to_api_kwargs(self, input=None, model_kwargs={}, model_type=ModelType.UNDEFINED) -> Dict:
         """Ask vLLM to report token usage on streaming responses.
@@ -120,6 +123,7 @@ class VLLMClient(OpenAIClient):
             if emit_marker and usage is not None:
                 yield _usage_marker_chunk(usage)
         finally:
+            self.last_usage = usage
             self._log_usage(usage, model)
 
     async def acall(self, api_kwargs: Dict = {}, model_type: ModelType = ModelType.UNDEFINED):

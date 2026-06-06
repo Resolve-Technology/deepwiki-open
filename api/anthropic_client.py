@@ -121,6 +121,9 @@ class AnthropicClient:
         self._auth_token = auth_token
         self._base_url = base_url
         self._async_client: Optional[anthropic.AsyncAnthropic] = None
+        # Usage of the most recent stream, for non-streaming consumers
+        # (api/llm_dispatch.py); the websocket path ignores it.
+        self.last_usage = None
 
     def _resolve_token(self) -> str:
         token = self._auth_token or os.getenv("CLAUDE_OAUTH_TOKEN")
@@ -217,6 +220,7 @@ class AnthropicClient:
                 yield _ShimChunk(text)
             final = await stream.get_final_message()
         usage = getattr(final, "usage", None)
+        self.last_usage = usage
         if usage is not None:
             log.info(
                 f"Claude (native) usage: model={model} "
