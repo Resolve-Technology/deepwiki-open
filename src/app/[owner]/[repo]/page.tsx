@@ -521,6 +521,20 @@ export default function RepoWikiPage() {
     return await findActiveJob();
   }, [effectiveRepoInfo, currentToken, language, selectedProviderState, selectedModelState, isComprehensiveView, isSelfReviewEnabled, modelExcludedDirs, modelExcludedFiles, modelIncludedDirs, modelIncludedFiles, authCode, findActiveJob]);
 
+  // Dismiss a finished job: removed server-side so it leaves the home page
+  // JobsPanel (and the journal) too, not just this view.
+  const dismissActiveJob = useCallback(async () => {
+    if (!activeJob) return;
+    const jobId = activeJob.id;
+    setActiveJob(null);
+    try {
+      const params = authCode ? `?authorization_code=${encodeURIComponent(authCode)}` : '';
+      await fetch(`/api/wiki_jobs/${jobId}${params}`, { method: 'DELETE' });
+    } catch (err) {
+      console.error('Error removing job:', err); // view already cleared; best-effort
+    }
+  }, [activeJob, authCode]);
+
   // Cancel the watched job (auth code passed like the refresh flow does)
   const cancelActiveJob = useCallback(async () => {
     if (!activeJob) return;
@@ -849,9 +863,14 @@ export default function RepoWikiPage() {
   // Re-enqueue after a failed/cancelled/interrupted job (fresh full run)
   const retryJob = useCallback(async () => {
     if (!activeJob) return;
-    const { provider, model } = activeJob;
+    const { provider, model, id: oldJobId } = activeJob;
     setActiveJob(null);
     setError(null);
+    // Best-effort: drop the failed entry the new run replaces
+    try {
+      const params = authCode ? `?authorization_code=${encodeURIComponent(authCode)}` : '';
+      await fetch(`/api/wiki_jobs/${oldJobId}${params}`, { method: 'DELETE' });
+    } catch { /* ignore */ }
     try {
       const job = await enqueueJob(false, provider, model);
       if (job) {
@@ -862,7 +881,7 @@ export default function RepoWikiPage() {
       console.error('Error retrying generation:', err);
       setError(err instanceof Error ? err.message : 'Failed to retry generation');
     }
-  }, [activeJob, enqueueJob]);
+  }, [activeJob, enqueueJob, authCode]);
 
   // Enqueue for the current selection (the cache-miss "Generate" button)
   const startGeneration = useCallback(async () => {
@@ -958,7 +977,7 @@ export default function RepoWikiPage() {
                     {messages.common?.retry || 'Retry'}
                   </button>
                   <button
-                    onClick={() => setActiveJob(null)}
+                    onClick={dismissActiveJob}
                     className="text-xs px-4 py-1.5 bg-[var(--background)] text-[var(--foreground)] rounded-md hover:bg-[var(--background)]/80 border border-[var(--border-color)] transition-colors"
                   >
                     Dismiss

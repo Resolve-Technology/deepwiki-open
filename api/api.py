@@ -861,6 +861,22 @@ async def cancel_wiki_job(job_id: str, authorization_code: Optional[str] = Query
         raise HTTPException(status_code=404, detail="Job not found")
     return {"status": job.status}
 
+@app.delete("/api/wiki_jobs/{job_id}")
+async def remove_wiki_job(job_id: str, authorization_code: Optional[str] = Query(None, description="Authorization code")):
+    """Remove a finished job from the list (409 while it is queued/running)."""
+    if WIKI_AUTH_MODE:
+        logger.info("check the authorization code")
+        if not authorization_code or WIKI_AUTH_CODE != authorization_code:
+            raise HTTPException(status_code=401, detail="Authorization code is invalid")
+    from api.wiki_jobs import get_manager
+    try:
+        job = get_manager().remove(job_id)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"message": "Job removed", "status": job.status}
+
 @app.on_event("startup")
 async def start_wiki_job_workers():
     from api.wiki_jobs import get_manager

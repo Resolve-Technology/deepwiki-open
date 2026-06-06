@@ -83,6 +83,17 @@ export default function JobsPanel({ authCode, className = '' }: JobsPanelProps) 
     }
   }, [authCode, fetchJobs]);
 
+  // Dismiss a finished job: removed server-side, so it stays gone on reload
+  const removeJob = useCallback(async (jobId: string) => {
+    try {
+      const params = authCode ? `?authorization_code=${encodeURIComponent(authCode)}` : '';
+      await fetch(`/api/wiki_jobs/${jobId}${params}`, { method: 'DELETE' });
+      fetchJobs();
+    } catch (err) {
+      console.error('Error removing wiki job:', err);
+    }
+  }, [authCode, fetchJobs]);
+
   const activeJobs = jobs.filter(j => ACTIVE_STATUSES.includes(j.status));
   const recentFinished = jobs.filter(j =>
     !ACTIVE_STATUSES.includes(j.status) &&
@@ -141,11 +152,21 @@ export default function JobsPanel({ authCode, className = '' }: JobsPanelProps) 
                 {job.repo.owner}/{job.repo.repo}
                 <span className="text-[var(--muted)]"> · {job.provider}/{job.model}</span>
               </Link>
-              <span
-                className={`px-2 py-0.5 rounded-full border flex-shrink-0 ${statusBadgeClasses[job.status] || statusBadgeClasses.queued}`}
-                title={job.error || undefined}
-              >
-                {job.status}
+              <span className="flex items-center gap-1.5 flex-shrink-0">
+                <span
+                  className={`px-2 py-0.5 rounded-full border ${statusBadgeClasses[job.status] || statusBadgeClasses.queued}`}
+                  title={job.error || undefined}
+                >
+                  {job.status}
+                </span>
+                <button
+                  onClick={() => removeJob(job.id)}
+                  title="Remove from this list"
+                  aria-label="Remove job"
+                  className="px-1.5 py-0.5 rounded border border-[var(--border-color)] text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-[var(--background)] transition-colors leading-none"
+                >
+                  ×
+                </button>
               </span>
             </li>
           ))}

@@ -164,6 +164,22 @@ class JobManager:
     def list_jobs(self) -> List[WikiJob]:
         return list(self.jobs.values())
 
+    def remove(self, job_id: str) -> Optional[WikiJob]:
+        """Drop a finished job from the registry/journal (dismiss from UI).
+
+        Returns None for unknown ids; raises ValueError while the job is
+        still queued/running — cancel it first.
+        """
+        job = self.jobs.get(job_id)
+        if job is None:
+            return None
+        if job.status in ACTIVE_STATUSES:
+            raise ValueError(f"Job {job_id} is {job.status}; cancel it before removing")
+        del self.jobs[job_id]
+        self._persist()
+        logger.info(f"Removed wiki job {job.id} (was {job.status})")
+        return job
+
     def cancel(self, job_id: str) -> Optional[WikiJob]:
         job = self.jobs.get(job_id)
         if job is None:

@@ -199,6 +199,40 @@ def test_cancel_unknown_job(journal):
     assert mgr.cancel("nope") is None
 
 
+# --- removal (dismiss) ------------------------------------------------------
+
+
+def test_remove_finished_job_and_journal(journal):
+    mgr = JobManager(concurrency=2, journal_path=journal)
+    job = mgr.submit(make_job())
+    job.status = "failed"
+    mgr._persist()
+
+    removed = mgr.remove(job.id)
+    assert removed.id == job.id
+    assert mgr.get(job.id) is None
+    with open(journal, encoding="utf-8") as f:
+        assert job.id not in f.read()
+    # a fresh manager no longer sees it
+    assert JobManager(concurrency=2, journal_path=journal).list_jobs() == []
+
+
+def test_remove_active_job_refused(journal):
+    mgr = JobManager(concurrency=2, journal_path=journal)
+    job = mgr.submit(make_job())  # queued
+    with pytest.raises(ValueError, match="cancel it before removing"):
+        mgr.remove(job.id)
+    job.status = "running"
+    with pytest.raises(ValueError, match="cancel it before removing"):
+        mgr.remove(job.id)
+    assert mgr.get(job.id) is not None
+
+
+def test_remove_unknown_job(journal):
+    mgr = JobManager(concurrency=1, journal_path=journal)
+    assert mgr.remove("nope") is None
+
+
 # --- journal -------------------------------------------------------------------------------
 
 
