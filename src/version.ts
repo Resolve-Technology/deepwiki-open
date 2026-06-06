@@ -4,4 +4,4 @@
  * Convention: bump this every time a new Docker image is built so it's always
  * possible to tell from the UI which build is running.
  */
-export const APP_VERSION = '0.2.5';
+export const APP_VERSION = '0.2.6';

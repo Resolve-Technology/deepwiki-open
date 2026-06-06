@@ -84,6 +84,7 @@ class ChatCompletionRequest(BaseModel):
     excluded_files: Optional[str] = Field(None, description="Comma-separated list of file patterns to exclude from processing")
     included_dirs: Optional[str] = Field(None, description="Comma-separated list of directories to include exclusively")
     included_files: Optional[str] = Field(None, description="Comma-separated list of file patterns to include exclusively")
+    include_usage: Optional[bool] = Field(False, description="Append a <<<USAGE_JSON:...>>> trailer with token counts after the stream (callers must strip it from the content)")
 
 @app.post("/chat/completions/stream")
 async def chat_completions_stream(request: ChatCompletionRequest):
@@ -434,6 +435,8 @@ async def chat_completions_stream(request: ChatCompletionRequest):
             # Only add top_p if it exists in the model config
             if "top_p" in model_config:
                 model_kwargs["top_p"] = model_config["top_p"]
+            if request.include_usage:
+                model_kwargs["include_usage_marker"] = True
 
             api_kwargs = model.convert_inputs_to_api_kwargs(
                 input=prompt,
@@ -460,6 +463,8 @@ async def chat_completions_stream(request: ChatCompletionRequest):
                 model_kwargs["max_tokens"] = model_config["max_tokens"]
             if "thinking" in model_config:
                 model_kwargs["thinking"] = model_config["thinking"]
+            if request.include_usage:
+                model_kwargs["include_usage_marker"] = True
 
             api_kwargs = model.convert_inputs_to_api_kwargs(
                 input=prompt,

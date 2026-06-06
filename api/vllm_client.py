@@ -1,13 +1,31 @@
 import logging
 import os
+from types import SimpleNamespace
 from typing import Any, Dict, Optional, Callable
 from openai import AsyncOpenAI, OpenAI
 
 from adalflow.core.types import ModelType
 
+from api.anthropic_client import format_usage_marker
 from api.openai_client import OpenAIClient
 
 log = logging.getLogger(__name__)
+
+
+def _usage_marker_chunk(usage: Any) -> SimpleNamespace:
+    """OpenAI-chunk-shaped trailer carrying token counts for the frontend.
+
+    Mirrors the claude native client's usage marker (input/output naming) so
+    the same frontend extractor handles both providers.
+    """
+    text = format_usage_marker(
+        getattr(usage, "prompt_tokens", 0) or 0,
+        getattr(usage, "completion_tokens", 0) or 0,
+    )
+    return SimpleNamespace(
+        choices=[SimpleNamespace(delta=SimpleNamespace(content=text))],
+        usage=None,
+    )
 
 
 class VLLMClient(OpenAIClient):
@@ -64,10 +82,18 @@ class VLLMClient(OpenAIClient):
         With ``stream_options.include_usage`` set, vLLM appends a final chunk
         with empty ``choices`` and a populated ``usage`` field. Existing
         consumers skip chunks without choices, so this is transparent to them.
+
+        ``include_usage_marker`` (internal flag, never sent to the API): when
+        set, the stream additionally ends with a ``<<<USAGE_JSON:...>>>``
+        trailer chunk for the frontend's per-phase token accounting.
         """
+        model_kwargs = dict(model_kwargs or {})
+        include_marker = bool(model_kwargs.pop("include_usage_marker", False))
         api_kwargs = super().convert_inputs_to_api_kwargs(input, model_kwargs, model_type)
         if model_type == ModelType.LLM and api_kwargs.get("stream", False):
             api_kwargs.setdefault("stream_options", {"include_usage": True})
+            if include_marker:
+                api_kwargs["_include_usage_marker"] = True
         return api_kwargs
 
     def _log_usage(self, usage: Any, model: Optional[str]) -> None:
@@ -80,23 +106,31 @@ class VLLMClient(OpenAIClient):
             f"total_tokens={getattr(usage, 'total_tokens', None)}"
         )
 
-    async def _stream_with_usage_logging(self, stream, model: Optional[str]):
-        """Yield chunks unchanged while capturing the final usage chunk."""
+    async def _stream_with_usage_logging(self, stream, model: Optional[str], emit_marker: bool = False):
+        """Yield chunks unchanged while capturing the final usage chunk.
+
+        With ``emit_marker`` the captured usage is also appended as a marker
+        chunk so the frontend can account tokens.
+        """
         usage = None
         try:
             async for chunk in stream:
                 usage = getattr(chunk, "usage", None) or usage
                 yield chunk
+            if emit_marker and usage is not None:
+                yield _usage_marker_chunk(usage)
         finally:
             self._log_usage(usage, model)
 
     async def acall(self, api_kwargs: Dict = {}, model_type: ModelType = ModelType.UNDEFINED):
         """Same as OpenAIClient.acall, but logs token usage for LLM calls."""
+        api_kwargs = dict(api_kwargs or {})
+        emit_marker = bool(api_kwargs.pop("_include_usage_marker", False))
         response = await super().acall(api_kwargs=api_kwargs, model_type=model_type)
         if model_type == ModelType.LLM:
             model = api_kwargs.get("model")
             if api_kwargs.get("stream", False):
-                return self._stream_with_usage_logging(response, model)
+                return self._stream_with_usage_logging(response, model, emit_marker)
             self._log_usage(getattr(response, "usage", None), model)
         return response
 

@@ -568,6 +568,8 @@ This file contains...
             # Only add top_p if it exists in the model config
             if "top_p" in model_config:
                 model_kwargs["top_p"] = model_config["top_p"]
+            if request.include_usage:
+                model_kwargs["include_usage_marker"] = True
 
             api_kwargs = model.convert_inputs_to_api_kwargs(
                 input=prompt,
