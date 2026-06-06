@@ -98,6 +98,27 @@ def test_page_prompt_deep_dive_wiki_page_topic():
     assert "[CURRENT_FILE_CONTENT]: provided in the request context." in p
 
 
+def test_page_prompt_five_plus_files_keeps_original_clauses():
+    paths = [f"src/f{i}.py" for i in range(5)]
+    p = build_page_prompt("P", paths, "en", False, *REPO)
+    assert "You MUST use AT LEAST 5 relevant source files" in p
+    assert "There MUST be AT LEAST 5 source files listed" in p
+    assert "<!-- Add additional relevant files if fewer than 5 were provided -->" in p
+    assert "You MUST cite AT LEAST 5 different source files" in p
+
+
+def test_page_prompt_few_files_relaxes_clauses():
+    # Small repos: pages get 1-2 filePaths and generation is retrieval-free,
+    # so the >=5 demand is unsatisfiable; strict models (gpt-oss-120b) refused
+    # the page outright. Deliberate deviation from the verbatim port.
+    p = build_page_prompt("P", ["a.py", "b.py"], "en", False, *REPO)
+    assert "AT LEAST 5" not in p
+    assert "Use ALL of the provided source files" in p
+    assert "do NOT invent or add files that were not provided" in p
+    assert "Do NOT refuse, apologize, or truncate the page" in p
+    assert "<!-- Add additional relevant files" not in p
+
+
 def test_deep_dive_prompt_differs():
     assert build_page_prompt("P", ["x"], "en", True, *REPO) != \
            build_page_prompt("P", ["x"], "en", False, *REPO)

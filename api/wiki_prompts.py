@@ -279,6 +279,34 @@ def build_page_prompt(page_title: str, file_paths: List[str], language: str,
     )
     first_file = file_paths[0] if file_paths else "source"
 
+    # Deliberate deviation from the verbatim frontend port: the original
+    # prompt hard-requires ">= 5 source files" and tells the model to "search
+    # the codebase" for more — but generation runs retrieval-free, so on small
+    # repos (pages get 1-2 filePaths) that demand is unsatisfiable. Claude
+    # shrugs it off; stricter models (gpt-oss-120b) refuse the page outright
+    # ("Insufficient source files were provided..."). Relax the clauses when
+    # fewer than 5 files were assigned.
+    many_files = len(file_paths) >= 5
+    given_files_clause = (
+        "You MUST use AT LEAST 5 relevant source files for comprehensive coverage - if fewer are provided, search for additional related files in the codebase."
+        if many_files else
+        "Use ALL of the provided source files; this repository is small, so fewer than 5 files is expected and is NOT a problem."
+    )
+    details_clause = (
+        "There MUST be AT LEAST 5 source files listed - if fewer were provided, you MUST find additional related files to include."
+        if many_files else
+        "List ALL of the provided source files; do NOT invent or add files that were not provided."
+    )
+    details_comment = (
+        "<!-- Add additional relevant files if fewer than 5 were provided -->\n"
+        if many_files else ""
+    )
+    citation_clause = (
+        "    *   IMPORTANT: You MUST cite AT LEAST 5 different source files throughout the wiki page to ensure comprehensive coverage.\n"
+        if many_files else
+        "    *   IMPORTANT: Cite the provided source files extensively throughout the wiki page — every section must trace back to them. Do NOT refuse, apologize, or truncate the page because fewer than 5 files were provided; write the complete page from the files given.\n"
+    )
+
     if deep_dive:
         return (
             "You are a senior mainframe/COBOL systems analyst producing the definitive reference analysis of one program.\n"
@@ -383,10 +411,10 @@ def build_page_prompt(page_title: str, file_paths: List[str], language: str,
             "\n"
             "You will be given:\n"
             "1. The \"[WIKI_PAGE_TOPIC]\" for the page you need to create.\n"
-            "2. A list of \"[RELEVANT_SOURCE_FILES]\" from the project that you MUST use as the sole basis for the content. You have access to the full content of these files. You MUST use AT LEAST 5 relevant source files for comprehensive coverage - if fewer are provided, search for additional related files in the codebase.\n"
+            f"2. A list of \"[RELEVANT_SOURCE_FILES]\" from the project that you MUST use as the sole basis for the content. You have access to the full content of these files. {given_files_clause}\n"
             "\n"
             "CRITICAL STARTING INSTRUCTION:\n"
-            "The very first thing on the page MUST be a `<details>` block listing ALL the `[RELEVANT_SOURCE_FILES]` you used to generate the content. There MUST be AT LEAST 5 source files listed - if fewer were provided, you MUST find additional related files to include.\n"
+            f"The very first thing on the page MUST be a `<details>` block listing ALL the `[RELEVANT_SOURCE_FILES]` you used to generate the content. {details_clause}\n"
             "Format it exactly like this:\n"
             "<details>\n"
             "<summary>Relevant source files</summary>\n"
@@ -395,7 +423,7 @@ def build_page_prompt(page_title: str, file_paths: List[str], language: str,
             "The following files were used as context for generating this wiki page:\n"
             "\n"
             + file_links + "\n"
-            "<!-- Add additional relevant files if fewer than 5 were provided -->\n"
+            + details_comment +
             "</details>\n"
             "\n"
             f"Immediately after the `<details>` block, the main title of the page should be a H1 Markdown heading: `# {page_title}`.\n"
@@ -462,7 +490,7 @@ def build_page_prompt(page_title: str, file_paths: List[str], language: str,
             "    *   Place citations at the end of the paragraph, under the diagram/table, or after the code snippet.\n"
             "    *   Use the exact format: `Sources: [filename.ext:start_line-end_line]()` for a range, or `Sources: [filename.ext:line_number]()` for a single line. Multiple files can be cited: `Sources: [file1.ext:1-10](), [file2.ext:5](), [dir/file3.ext]()` (if the whole file is relevant and line numbers are not applicable or too broad).\n"
             "    *   If an entire section is overwhelmingly based on one or two files, you can cite them under the section heading in addition to more specific citations within the section.\n"
-            "    *   IMPORTANT: You MUST cite AT LEAST 5 different source files throughout the wiki page to ensure comprehensive coverage.\n"
+            + citation_clause +
             "\n"
             "7.  **Technical Accuracy:** All information must be derived SOLELY from the `[RELEVANT_SOURCE_FILES]`. Do not infer, invent, or use external knowledge about similar systems or common practices unless it's directly supported by the provided code. If information is not present in the provided files, do not include it or explicitly state its absence if crucial to the topic.\n"
             "\n"
