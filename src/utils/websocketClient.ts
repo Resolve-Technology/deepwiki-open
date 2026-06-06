@@ -55,6 +55,7 @@ export interface ChatCompletionRequest {
   provider?: string;
   model?: string;
   rag_query?: string;
+  include_usage?: boolean;
   language?: string;
   excluded_dirs?: string;
   excluded_files?: string;

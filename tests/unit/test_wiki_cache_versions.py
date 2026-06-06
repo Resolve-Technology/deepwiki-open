@@ -373,3 +373,14 @@ def test_self_reviewed_flag_roundtrip(cache_dir):
     data = asyncio.run(read_wiki_cache("owner", "repo", "github", "en",
                                        provider="claude", model="claude-sonnet-4-6"))
     assert data.self_reviewed is True
+
+
+def test_stats_roundtrip(cache_dir):
+    req = make_cache_request("claude", "claude-haiku-4-5-20251001")
+    req.stats = {"generation": {"input_tokens": 100, "output_tokens": 200, "seconds": 30},
+                 "review": {"input_tokens": 110, "output_tokens": 90, "seconds": 25}}
+    asyncio.run(save_wiki_cache(req))
+    data = asyncio.run(read_wiki_cache("owner", "repo", "github", "en",
+                                       provider="claude", model="claude-haiku-4-5-20251001"))
+    assert data.stats["generation"]["input_tokens"] == 100
+    assert data.stats["review"]["seconds"] == 25

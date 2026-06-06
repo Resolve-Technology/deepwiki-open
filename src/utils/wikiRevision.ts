@@ -12,6 +12,31 @@ import { WikiPage } from '@/types/wiki/wikipage';
 
 export const NO_CHANGES_TOKEN = 'NO_CHANGES';
 
+export interface ChatUsage {
+  input_tokens: number;
+  output_tokens: number;
+}
+
+// Matches the trailer the backend appends when a request sets include_usage
+// (see api/anthropic_client.py format_usage_marker).
+const USAGE_MARKER_RE = /\n?<<<USAGE_JSON:(\{[^}]*\})>>>\s*$/;
+
+/** Strips the usage trailer from streamed content and parses it, if present. */
+export function extractUsageMarker(text: string): { content: string; usage: ChatUsage | null } {
+  const match = text.match(USAGE_MARKER_RE);
+  if (!match) return { content: text, usage: null };
+  let usage: ChatUsage | null = null;
+  try {
+    const parsed = JSON.parse(match[1]);
+    if (typeof parsed.input_tokens === 'number' && typeof parsed.output_tokens === 'number') {
+      usage = parsed;
+    }
+  } catch {
+    // malformed marker — drop it from the content anyway
+  }
+  return { content: text.slice(0, match.index), usage };
+}
+
 /**
  * Runs a single chat request to completion and resolves with the full text.
  * `onSocket` exposes the underlying WebSocket so callers can abort it (e.g.

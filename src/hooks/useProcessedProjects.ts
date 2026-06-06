@@ -10,6 +10,7 @@ interface ProcessedProject {
   language: string;
   provider?: string;
   model?: string;
+  stats?: Record<string, unknown>;
 }
 
 export function useProcessedProjects() {

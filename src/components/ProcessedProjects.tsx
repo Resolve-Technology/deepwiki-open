@@ -5,6 +5,12 @@ import Link from 'next/link';
 import { FaTimes, FaTh, FaList } from 'react-icons/fa';
 
 // Interface should match the structure from the API
+interface PhaseStats {
+  input_tokens: number;
+  output_tokens: number;
+  seconds: number;
+}
+
 interface ProcessedProject {
   id: string;
   owner: string;
@@ -15,7 +21,39 @@ interface ProcessedProject {
   language: string;
   provider?: string;
   model?: string;
+  stats?: {
+    generation?: PhaseStats;
+    review?: PhaseStats;
+  };
 }
+
+const formatTokens = (stats: PhaseStats): string => {
+  const total = stats.input_tokens + stats.output_tokens;
+  return total >= 1000 ? `${Math.round(total / 1000)}k` : `${total}`;
+};
+
+const formatDuration = (seconds: number): string => {
+  if (seconds >= 60) {
+    return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  }
+  return `${seconds}s`;
+};
+
+const hasPhaseData = (phase?: PhaseStats): phase is PhaseStats =>
+  !!phase && (phase.input_tokens + phase.output_tokens > 0 || phase.seconds > 0);
+
+/** "Pass 1: 459k tok · 17m 3s — Review: 242k tok · 12m 40s" */
+const formatStats = (stats: ProcessedProject['stats']): string | null => {
+  if (!stats) return null;
+  const parts: string[] = [];
+  if (hasPhaseData(stats.generation)) {
+    parts.push(`Pass 1: ${formatTokens(stats.generation)} tok · ${formatDuration(stats.generation.seconds)}`);
+  }
+  if (hasPhaseData(stats.review)) {
+    parts.push(`Review: ${formatTokens(stats.review)} tok · ${formatDuration(stats.review.seconds)}`);
+  }
+  return parts.length > 0 ? parts.join(' — ') : null;
+};
 
 interface ProcessedProjectsProps {
   showHeader?: boolean;
@@ -247,6 +285,11 @@ export default function ProcessedProjects({
                   <p className="text-xs text-[var(--muted)]">
                     {t('processedOn')} {new Date(project.submittedAt).toLocaleDateString()}
                   </p>
+                  {formatStats(project.stats) && (
+                    <p className="text-xs text-[var(--muted)] mt-1">
+                      {formatStats(project.stats)}
+                    </p>
+                  )}
                 </Link>
               </div>
             ) : (
@@ -268,7 +311,7 @@ export default function ProcessedProjects({
                       {project.name}
                     </h3>
                     <p className="text-xs text-[var(--muted)] mt-1">
-                      {t('processedOn')} {new Date(project.submittedAt).toLocaleDateString()} • {project.repo_type} • {project.language}{project.provider && project.model ? ` • ${project.provider}/${project.model}` : ''}
+                      {t('processedOn')} {new Date(project.submittedAt).toLocaleDateString()} • {project.repo_type} • {project.language}{project.provider && project.model ? ` • ${project.provider}/${project.model}` : ''}{formatStats(project.stats) ? ` • ${formatStats(project.stats)}` : ''}
                     </p>
                   </div>
                   <div className="flex gap-2 ml-4">

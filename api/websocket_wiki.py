@@ -59,6 +59,7 @@ class ChatCompletionRequest(BaseModel):
     )
     model: Optional[str] = Field(None, description="Model name for the specified provider")
     rag_query: Optional[str] = Field(None, description="Optional short query used for RAG retrieval instead of the last message; lets oversized prompts still receive repository context")
+    include_usage: Optional[bool] = Field(False, description="Append a <<<USAGE_JSON:...>>> trailer with token counts after the stream (callers must strip it from the content)")
 
     language: Optional[str] = Field("en", description="Language for content generation (e.g., 'en', 'ja', 'zh', 'es', 'kr', 'vi')")
     excluded_dirs: Optional[str] = Field(None, description="Comma-separated list of directories to exclude from processing")
@@ -589,6 +590,8 @@ This file contains...
                 model_kwargs["max_tokens"] = model_config["max_tokens"]
             if "thinking" in model_config:
                 model_kwargs["thinking"] = model_config["thinking"]
+            if request.include_usage:
+                model_kwargs["include_usage_marker"] = True
 
             api_kwargs = model.convert_inputs_to_api_kwargs(
                 input=prompt,

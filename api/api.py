@@ -68,6 +68,7 @@ class ProcessedProjectEntry(BaseModel):
     language: str # Extracted from filename
     provider: Optional[str] = None  # Extracted from versioned filenames
     model: Optional[str] = None     # Extracted from versioned filenames
+    stats: Optional[Dict[str, Any]] = None  # generation token/time stats from the cache JSON
 
 class RepoInfo(BaseModel):
     owner: str
@@ -112,6 +113,7 @@ class WikiCacheData(BaseModel):
     generated_at: Optional[str] = None  # ISO-8601 UTC, set server-side on save
     repo_commit: Optional[str] = None   # git HEAD of the analyzed clone, when resolvable
     self_reviewed: Optional[bool] = None  # pages went through the self-review pass
+    stats: Optional[Dict[str, Any]] = None  # per-phase token/time accounting from generation
 
 class WikiCacheRequest(BaseModel):
     """
@@ -124,6 +126,7 @@ class WikiCacheRequest(BaseModel):
     provider: str
     model: str
     self_reviewed: Optional[bool] = None
+    stats: Optional[Dict[str, Any]] = None
 
 class WikiReviewData(BaseModel):
     """A cross-model review of one saved wiki version."""
@@ -644,6 +647,7 @@ async def save_wiki_cache(data: WikiCacheRequest) -> bool:
             generated_at=datetime.now(timezone.utc).isoformat(),
             repo_commit=get_repo_commit(data.repo),
             self_reviewed=data.self_reviewed,
+            stats=data.stats,
         )
         # Log size of data to be cached for debugging (avoid logging full content if large)
         try:
@@ -880,6 +884,17 @@ async def get_processed_projects():
                         logger.warning(f"Could not parse project details from filename: {filename}")
                         continue
                     stats = await asyncio.to_thread(os.stat, file_path) # Use asyncio.to_thread for os.stat
+                    # Pull the generation stats out of the cache JSON. This reads
+                    # the whole file, which is fine at this deployment's scale
+                    # (a handful of caches); revisit with a sidecar if it grows.
+                    generation_stats = None
+                    try:
+                        def _read_stats(path: str):
+                            with open(path, 'r', encoding='utf-8') as f:
+                                return json.load(f).get('stats')
+                        generation_stats = await asyncio.to_thread(_read_stats, file_path)
+                    except Exception:
+                        pass  # stats are cosmetic; never fail the listing over them
                     project_entries.append(
                         ProcessedProjectEntry(
                             id=filename,
@@ -891,6 +906,7 @@ async def get_processed_projects():
                             language=parsed["language"],
                             provider=parsed["provider"],
                             model=parsed["model"],
+                            stats=generation_stats,
                         )
                     )
                 except Exception as e:

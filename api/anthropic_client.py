@@ -22,6 +22,7 @@ Expected environment variables:
     CLAUDE_NATIVE_API_BASE_URL=...             # optional; SDK default otherwise
 """
 
+import json
 import logging
 import os
 import re
@@ -48,6 +49,16 @@ _STRUCTURAL_MARKERS = (
 )
 
 _TRAILING_ASSISTANT = re.compile(r"\n*Assistant:\s*$")
+
+
+def format_usage_marker(input_tokens: int, output_tokens: int) -> str:
+    """Trailer appended to a stream when the caller asked for usage accounting.
+
+    The frontend strips it from the content with a matching regex
+    (see src/utils/wikiRevision.ts extractUsageMarker).
+    """
+    payload = json.dumps({"input_tokens": input_tokens, "output_tokens": output_tokens})
+    return f"\n<<<USAGE_JSON:{payload}>>>"
 
 
 def split_prompt(prompt: str) -> Tuple[str, str]:
@@ -153,6 +164,9 @@ class AnthropicClient:
 
         kwargs = dict(model_kwargs or {})
         kwargs.pop("stream", None)  # the stream helper handles streaming
+        # Internal flag (not an API param): emit a usage marker after the stream
+        # so the frontend can account tokens per generation phase.
+        include_usage_marker = bool(kwargs.pop("include_usage_marker", False))
 
         system, user = split_prompt(input or "")
         api_kwargs: Dict[str, Any] = {
@@ -181,6 +195,8 @@ class AnthropicClient:
         # Anything else the config provides (e.g. temperature on models that
         # still accept it) passes through untouched.
         api_kwargs.update(kwargs)
+        if include_usage_marker:
+            api_kwargs["_include_usage_marker"] = True
         return api_kwargs
 
     async def acall(
@@ -193,6 +209,7 @@ class AnthropicClient:
         return self._stream_chunks(dict(api_kwargs or {}))
 
     async def _stream_chunks(self, api_kwargs: Dict[str, Any]) -> AsyncIterator[_ShimChunk]:
+        include_marker = api_kwargs.pop("_include_usage_marker", False)
         client = self.init_async_client()
         model = api_kwargs.get("model")
         async with client.messages.stream(**api_kwargs) as stream:
@@ -208,3 +225,8 @@ class AnthropicClient:
                 f"cache_read_input_tokens={getattr(usage, 'cache_read_input_tokens', None)} "
                 f"cache_creation_input_tokens={getattr(usage, 'cache_creation_input_tokens', None)}"
             )
+            if include_marker:
+                yield _ShimChunk(format_usage_marker(
+                    getattr(usage, "input_tokens", 0) or 0,
+                    getattr(usage, "output_tokens", 0) or 0,
+                ))

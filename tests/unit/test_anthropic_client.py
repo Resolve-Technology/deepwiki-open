@@ -125,3 +125,29 @@ def test_base_url_strips_v1_from_compat_var(monkeypatch):
     monkeypatch.setenv("CLAUDE_API_BASE_URL", "https://relay.example.com/v1")
     client = AnthropicClient(auth_token="sk-ant-oat01-test")
     assert client._resolve_base_url() == "https://relay.example.com"
+
+
+# --- usage marker ---
+
+def test_format_usage_marker_roundtrip():
+    from api.anthropic_client import format_usage_marker
+    import json as _json
+    import re as _re
+    marker = format_usage_marker(445359, 255929)
+    # Same regex shape the frontend uses to strip it
+    m = _re.search(r"\n?<<<USAGE_JSON:(\{.*\})>>>\s*$", marker)
+    assert m
+    payload = _json.loads(m.group(1))
+    assert payload == {"input_tokens": 445359, "output_tokens": 255929}
+
+
+def test_convert_pops_usage_marker_flag():
+    client = AnthropicClient(auth_token="sk-ant-oat01-test")
+    kwargs = client.convert_inputs_to_api_kwargs(
+        input=make_prompt(),
+        model_kwargs={"model": "claude-haiku-4-5-20251001", "max_tokens": 64000,
+                      "include_usage_marker": True},
+        model_type=ModelType.LLM,
+    )
+    assert kwargs["_include_usage_marker"] is True
+    assert "include_usage_marker" not in kwargs  # never reaches the API params

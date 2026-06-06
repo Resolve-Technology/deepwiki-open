@@ -11,7 +11,7 @@ import { useLanguage } from '@/contexts/LanguageContext';
 import { RepoInfo } from '@/types/repoinfo';
 import getRepoUrl from '@/utils/getRepoUrl';
 import { getWebSocketUrl, ChatCompletionRequest } from '@/utils/websocketClient';
-import { runChatOnce, buildPageRagQuery, buildSelfReviewPrompt, parseRevisedContent } from '@/utils/wikiRevision';
+import { runChatOnce, buildPageRagQuery, buildSelfReviewPrompt, parseRevisedContent, extractUsageMarker } from '@/utils/wikiRevision';
 import { extractUrlDomain, extractUrlPath } from '@/utils/urlDecoder';
 import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
@@ -274,6 +274,14 @@ export default function RepoWikiPage() {
   const [structureRequestInProgress, setStructureRequestInProgress] = useState(false);
   // Create a flag to track if data was loaded from cache to prevent immediate re-save
   const cacheLoadedSuccessfully = useRef(false);
+
+  // Per-phase token/time accounting for the current generation run. Tokens
+  // come from the backend's opt-in usage trailer (claude provider); time is
+  // measured here. Saved into the cache as `stats` and shown on the home page.
+  const runStatsRef = useRef({
+    generation: { input_tokens: 0, output_tokens: 0, ms: 0 },
+    review: { input_tokens: 0, output_tokens: 0, ms: 0 },
+  });
 
   // Create a flag to ensure the effect only runs once
   const effectRan = React.useRef(false);
@@ -652,7 +660,8 @@ IMPORTANT: Generate the content in ${language === 'en' ? 'English' :
           messages: [{
             role: 'user',
             content: promptContent
-          }]
+          }],
+          include_usage: true,
         };
 
         // Add tokens if available
@@ -668,6 +677,7 @@ IMPORTANT: Generate the content in ${language === 'en' ? 'English' :
         }
 
         // Use WebSocket for communication
+        const genStart = Date.now();
         let content = '';
         let ws: WebSocket | undefined;
 
@@ -767,6 +777,15 @@ IMPORTANT: Generate the content in ${language === 'en' ? 'English' :
           }
         }
 
+        // Strip and account the usage trailer (before any content cleanup)
+        const genExtract = extractUsageMarker(content);
+        content = genExtract.content;
+        if (genExtract.usage) {
+          runStatsRef.current.generation.input_tokens += genExtract.usage.input_tokens;
+          runStatsRef.current.generation.output_tokens += genExtract.usage.output_tokens;
+        }
+        runStatsRef.current.generation.ms += Date.now() - genStart;
+
         // Clean up markdown delimiters
         content = content.replace(/^```markdown\s*/i, '').replace(/```\s*$/i, '');
 
@@ -777,6 +796,7 @@ IMPORTANT: Generate the content in ${language === 'en' ? 'English' :
         // any failure keeps the original content.
         if (isSelfReviewEnabled && content.trim() && !content.startsWith('Error')) {
           setLoadingMessage(`Reviewing ${page.title} against the codebase...`);
+          const revStart = Date.now();
           try {
             const reviewBody: Record<string, any> = {  // eslint-disable-line @typescript-eslint/no-explicit-any
               repo_url: repoUrl,
@@ -786,6 +806,7 @@ IMPORTANT: Generate the content in ${language === 'en' ? 'English' :
                 content: buildSelfReviewPrompt({ ...page, content }, repoUrl),
               }],
               rag_query: buildPageRagQuery(page),
+              include_usage: true,
             };
             // Deep-dive pages get the full program source injected server-side
             // during generation; give the review pass the same grounding.
@@ -794,7 +815,15 @@ IMPORTANT: Generate the content in ${language === 'en' ? 'English' :
             }
             addTokensToRequestBody(reviewBody, currentToken, effectiveRepoInfo.type, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, language, modelExcludedDirs, modelExcludedFiles, modelIncludedDirs, modelIncludedFiles);
             const reviewed = await runChatOnce(reviewBody as unknown as ChatCompletionRequest);
-            const { content: corrected, changed } = parseRevisedContent(content, reviewed);
+            runStatsRef.current.review.ms += Date.now() - revStart;
+            // Account the usage trailer first — it would otherwise break the
+            // NO_CHANGES exact-match in parseRevisedContent.
+            const revExtract = extractUsageMarker(reviewed);
+            if (revExtract.usage) {
+              runStatsRef.current.review.input_tokens += revExtract.usage.input_tokens;
+              runStatsRef.current.review.output_tokens += revExtract.usage.output_tokens;
+            }
+            const { content: corrected, changed } = parseRevisedContent(content, revExtract.content);
             if (changed) {
               console.log(`Self-review corrected ${page.title} (${content.length} -> ${corrected.length} chars)`);
               content = corrected;
@@ -802,6 +831,7 @@ IMPORTANT: Generate the content in ${language === 'en' ? 'English' :
               console.log(`Self-review: no changes for ${page.title}`);
             }
           } catch (reviewErr) {
+            runStatsRef.current.review.ms += Date.now() - revStart;
             console.warn(`Self-review failed for ${page.title}, keeping original:`, reviewErr);
           }
         }
@@ -1024,10 +1054,12 @@ IMPORTANT:
 
       // Add tokens if available
       addTokensToRequestBody(requestBody, currentToken, effectiveRepoInfo.type, selectedProviderState, selectedModelState, isCustomSelectedModelState, customSelectedModelState, language, modelExcludedDirs, modelExcludedFiles, modelIncludedDirs, modelIncludedFiles);
+      requestBody.include_usage = true;
 
       // Use WebSocket for communication.
       // The whole request/extract sequence retries because the structure
       // response occasionally arrives truncated or without parseable XML.
+      const structureStart = Date.now();
       let responseText = '';
       let xmlMatch: RegExpMatchArray | null = null;
       const MAX_STRUCTURE_ATTEMPTS = 3;
@@ -1133,6 +1165,14 @@ IMPORTANT:
          throw new Error('The specified Ollama embedding model was not found. Please ensure the model is installed locally or select a different embedding model in the configuration.');
        }
 
+      // Strip and account the usage trailer (per attempt) before any cleanup
+      const structExtract = extractUsageMarker(responseText);
+      responseText = structExtract.content;
+      if (structExtract.usage) {
+        runStatsRef.current.generation.input_tokens += structExtract.usage.input_tokens;
+        runStatsRef.current.generation.output_tokens += structExtract.usage.output_tokens;
+      }
+
         // Clean up markdown delimiters
       responseText = responseText.replace(/^```(?:xml)?\s*/i, '').replace(/```\s*$/i, '');
 
@@ -1150,6 +1190,8 @@ IMPORTANT:
         }
       }
       } // end structure attempts loop
+
+      runStatsRef.current.generation.ms += Date.now() - structureStart;
 
       if (!xmlMatch) {
         throw new Error('No valid XML found in response');
@@ -1940,6 +1982,11 @@ IMPORTANT:
     cacheLoadedSuccessfully.current = false;
     effectRan.current = false; // Allow the main data loading useEffect to run again
     setRefreshNonce(n => n + 1); // force the load effect to re-run even if no dep changed
+    // Fresh run, fresh accounting
+    runStatsRef.current = {
+      generation: { input_tokens: 0, output_tokens: 0, ms: 0 },
+      review: { input_tokens: 0, output_tokens: 0, ms: 0 },
+    };
 
     // Reset all state
     setWikiStructure(undefined);
@@ -2196,6 +2243,18 @@ IMPORTANT:
               provider: selectedProviderState,
               model: selectedModelState,
               self_reviewed: isSelfReviewEnabled,
+              stats: {
+                generation: {
+                  input_tokens: runStatsRef.current.generation.input_tokens,
+                  output_tokens: runStatsRef.current.generation.output_tokens,
+                  seconds: Math.round(runStatsRef.current.generation.ms / 1000),
+                },
+                review: {
+                  input_tokens: runStatsRef.current.review.input_tokens,
+                  output_tokens: runStatsRef.current.review.output_tokens,
+                  seconds: Math.round(runStatsRef.current.review.ms / 1000),
+                },
+              },
             };
             const response = await fetch(`/api/wiki_cache`, {
               method: 'POST',

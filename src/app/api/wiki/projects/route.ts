@@ -11,6 +11,7 @@ interface ApiProcessedProject {
   language: string;
   provider?: string;
   model?: string;
+  stats?: Record<string, unknown>;
 }
 // Payload for deleting a project cache
 interface DeleteProjectCachePayload {
