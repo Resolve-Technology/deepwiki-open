@@ -384,16 +384,3 @@ def test_stats_roundtrip(cache_dir):
                                        provider="claude", model="claude-haiku-4-5-20251001"))
     assert data.stats["generation"]["input_tokens"] == 100
     assert data.stats["review"]["seconds"] == 25
-
-
-def test_parse_vllm_models():
-    from api.api import parse_vllm_models
-    payload = {"object": "list", "data": [
-        {"id": "google/gemma-4-26B-A4B-it", "object": "model"},
-        {"id": "Qwen/Qwen3-32B", "object": "model"},
-        {"object": "model"},          # no id -> skipped
-        "garbage",                     # not a dict -> skipped
-    ]}
-    assert parse_vllm_models(payload) == ["google/gemma-4-26B-A4B-it", "Qwen/Qwen3-32B"]
-    assert parse_vllm_models({"data": "nope"}) == []
-    assert parse_vllm_models(None) == []

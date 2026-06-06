@@ -25,6 +25,7 @@ from api.openai_client import OpenAIClient
 from api.litellm_client import LiteLLMClient
 from api.vllm_client import VLLMClient
 from api.anthropic_client import AnthropicClient
+from api.vllm_discovery import get_vllm_route
 from api.openrouter_client import OpenRouterClient
 from api.azureai_client import AzureAIClient
 from api.dashscope_client import DashscopeClient
@@ -552,10 +553,13 @@ This file contains...
                 model_type=ModelType.LLM
             )
         elif request.provider == "vllm":
-            logger.info(f"Using vLLM (Openai protocol) with model: {request.model}")
+            # Route to whichever scanned server serves this model; fall back to
+            # the configured VLLM_API_BASE_URL when discovery hasn't seen it.
+            vllm_route = get_vllm_route(request.model)
+            logger.info(f"Using vLLM (Openai protocol) with model: {request.model} via {vllm_route or 'default base URL'}")
 
             # Initialize vLLM client (OpenAI-compatible; api key defaults to "dummy")
-            model = VLLMClient()
+            model = VLLMClient(base_url=vllm_route) if vllm_route else VLLMClient()
             model_kwargs = {
                 "model": request.model,
                 "stream": True,

@@ -3,9 +3,6 @@ import re
 import glob
 import logging
 import subprocess
-import time
-
-import requests
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -182,6 +179,7 @@ class AuthorizationConfig(BaseModel):
     code: str = Field(..., description="Authorization code")
 
 from api.config import configs, WIKI_AUTH_MODE, WIKI_AUTH_CODE
+from api.vllm_discovery import get_vllm_models
 
 @app.get("/lang/config")
 async def get_lang_config():
@@ -200,56 +198,6 @@ async def validate_auth_code(request: AuthorizationConfig):
     Check authorization code.
     """
     return {"success": WIKI_AUTH_CODE == request.code}
-
-# --- vLLM model discovery ---
-# The local vLLM chat server's model list is dynamic (whatever it was launched
-# with), so the dropdown is populated by scanning its OpenAI-style /v1/models
-# endpoint. Failures fall back to the static generator.json list; results are
-# cached briefly because /models/config is fetched on every page.
-_VLLM_SCAN_TTL_SECONDS = 60
-_vllm_scan_cache: Dict[str, Any] = {"expires": 0.0, "models": None}
-
-
-def parse_vllm_models(payload: Any) -> List[str]:
-    """Extracts model ids from an OpenAI-style GET /v1/models response."""
-    if not isinstance(payload, dict):
-        return []
-    data = payload.get("data", [])
-    if not isinstance(data, list):
-        return []
-    return [m["id"] for m in data if isinstance(m, dict) and m.get("id")]
-
-
-def _fetch_vllm_model_ids() -> Optional[List[str]]:
-    """Scans the local vLLM chat server for its served models (blocking)."""
-    base = os.getenv("VLLM_API_BASE_URL", "").rstrip("/")
-    if not base:
-        return None
-    if not base.endswith("/v1"):
-        base += "/v1"
-    try:
-        headers = {"Authorization": f"Bearer {os.getenv('VLLM_API_KEY', 'dummy')}"}
-        resp = requests.get(f"{base}/models", headers=headers, timeout=3)
-        resp.raise_for_status()
-        return parse_vllm_models(resp.json()) or None
-    except Exception as e:
-        logger.warning(f"vLLM model scan failed ({base}/models): {e}")
-        return None
-
-
-async def get_vllm_models_cached() -> Optional[List[str]]:
-    """Cached vLLM scan; keeps the last good list when the server is down."""
-    now = time.monotonic()
-    if now <= _vllm_scan_cache["expires"]:
-        return _vllm_scan_cache["models"]
-    scanned = await asyncio.to_thread(_fetch_vllm_model_ids)
-    if scanned:
-        _vllm_scan_cache["models"] = scanned
-    # On failure keep whatever we had (possibly None) but still back off,
-    # so a dead server doesn't add latency to every /models/config call.
-    _vllm_scan_cache["expires"] = now + _VLLM_SCAN_TTL_SECONDS
-    return _vllm_scan_cache["models"]
-
 
 @app.get("/models/config", response_model=ModelConfig)
 async def get_model_config():
@@ -277,10 +225,10 @@ async def get_model_config():
                 # Get a more user-friendly display name if possible
                 models.append(Model(id=model_id, name=model_id))
 
-            # Prefer the live model list from the local vLLM server when it
-            # responds; the static config list is the fallback.
+            # Prefer the live model list from the scanned vLLM servers when any
+            # respond; the static config list is the fallback.
             if provider_id == "vllm":
-                scanned = await get_vllm_models_cached()
+                scanned = await get_vllm_models()
                 if scanned:
                     models = [Model(id=model_id, name=model_id) for model_id in scanned]
 
