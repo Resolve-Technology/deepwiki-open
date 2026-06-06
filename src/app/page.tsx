@@ -677,7 +677,7 @@ export default function Home() {
         <div
           className="flex flex-col sm:flex-row justify-between items-center gap-4 bg-[var(--card-bg)] rounded-lg p-4 border border-[var(--border-color)] shadow-custom">
           <p className="text-[var(--muted)] text-sm font-serif">
-            {t('footer.copyright')} <span className="opacity-70">· v{APP_VERSION}</span>
+            {t('footer.copyright')} <span className="opacity-70">· Resolve Fork · v{APP_VERSION}</span>
           </p>
 
           <div className="flex items-center gap-6">
