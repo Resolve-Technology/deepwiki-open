@@ -7,6 +7,7 @@ these tests quote the websocket's format exactly (leading ``/no_think ``, the
 import pytest
 
 from api.prompt_assembly import (assemble_envelope, format_context_text,
+                                 number_source_lines,
                                  select_generation_system_prompt)
 
 
@@ -93,6 +94,37 @@ def test_system_prompt_anchors():
     assert "IMPORTANT:You MUST respond in English language." in p
     assert "JUST START with the direct answer to the question" in p
     assert p.endswith("</style>")
+
+
+def test_number_source_lines_prefixes_each_line():
+    out = number_source_lines("ALPHA\nBETA\nGAMMA")
+    assert out == (
+        "     1 | ALPHA\n"
+        "     2 | BETA\n"
+        "     3 | GAMMA"
+    )
+
+
+def test_number_source_lines_empty_returns_empty():
+    # Empty stays empty so the envelope's "no file content" path is untouched.
+    assert number_source_lines("") == ""
+
+
+def test_number_source_lines_drops_trailing_blank_line():
+    # splitlines() means a single trailing newline does not create a phantom
+    # numbered blank line.
+    assert number_source_lines("X\n") == "     1 | X"
+
+
+def test_number_source_lines_preserves_blank_interior_lines():
+    out = number_source_lines("A\n\nB")
+    assert out == "     1 | A\n     2 | \n     3 | B"
+
+
+def test_number_source_lines_normalizes_crlf():
+    # COBOL .txt sources are often CRLF; numbering normalizes to LF rows.
+    out = number_source_lines("A\r\nB")
+    assert out == "     1 | A\n     2 | B"
 
 
 def test_system_prompt_language_lookup():
