@@ -82,25 +82,26 @@ def format_context_text(retrieved_documents) -> str:
     documents = retrieved_documents[0].documents
     logger.info(f"Retrieved {len(documents)} documents")
 
-    # Group documents by file path
+    # Group documents by file path (preserves grouped order)
     docs_by_file = {}
     for doc in documents:
         file_path = doc.meta_data.get('file_path', 'unknown')
-        if file_path not in docs_by_file:
-            docs_by_file[file_path] = []
-        docs_by_file[file_path].append(doc)
+        docs_by_file.setdefault(file_path, []).append(doc)
 
-    # Format context text with file path grouping
     context_parts = []
     for file_path, docs in docs_by_file.items():
-        # Add file header with metadata
-        header = f"## File Path: {file_path}\n\n"
-        # Add document content
-        content = "\n\n".join([doc.text for doc in docs])
+        if all(d.meta_data.get('start_line') for d in docs):
+            # New index: render each chunk with absolute line numbers + range.
+            for doc in docs:
+                s = doc.meta_data['start_line']
+                e = doc.meta_data.get('end_line', s)
+                body = number_source_lines(doc.text, start=s)
+                context_parts.append(f"## File Path: {file_path} (lines {s}-{e})\n\n{body}")
+        else:
+            # Old index / no line info: original grouped, plain format.
+            content = "\n\n".join(doc.text for doc in docs)
+            context_parts.append(f"## File Path: {file_path}\n\n{content}")
 
-        context_parts.append(f"{header}{content}")
-
-    # Join all parts with clear separation
     return "\n\n" + "-" * 10 + "\n\n".join(context_parts)
 
 

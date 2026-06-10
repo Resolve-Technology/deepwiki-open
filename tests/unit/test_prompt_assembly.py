@@ -143,3 +143,37 @@ def test_number_source_lines_custom_start():
 def test_number_source_lines_default_start_unchanged():
     # Existing callers pass no start; must still number from 1.
     assert number_source_lines("A\nB") == "     1 | A\n     2 | B"
+
+
+class SpannedDoc:
+    def __init__(self, file_path, text, start_line, end_line):
+        self.meta_data = {"file_path": file_path,
+                          "start_line": start_line, "end_line": end_line}
+        self.text = text
+
+
+def test_format_context_text_numbers_spanned_chunks():
+    docs = [SpannedDoc("PAY.cbl", "READ-MASTER.\n    READ FILE", 120, 121)]
+    out = format_context_text([FakeRetrieverOutput(docs)])
+    expected = (
+        "\n\n" + "-" * 10 +
+        "## File Path: PAY.cbl (lines 120-121)\n\n"
+        "   120 | READ-MASTER.\n"
+        "   121 |     READ FILE"
+    )
+    assert out == expected
+
+
+def test_format_context_text_multiple_spanned_chunks_same_file():
+    docs = [SpannedDoc("PAY.cbl", "AAA", 10, 10),
+            SpannedDoc("PAY.cbl", "BBB", 50, 50)]
+    out = format_context_text([FakeRetrieverOutput(docs)])
+    assert "## File Path: PAY.cbl (lines 10-10)\n\n    10 | AAA" in out
+    assert "## File Path: PAY.cbl (lines 50-50)\n\n    50 | BBB" in out
+
+
+def test_format_context_text_spanless_unchanged():
+    docs = [FakeDoc("a.py", "first chunk"), FakeDoc("a.py", "second chunk")]
+    out = format_context_text([FakeRetrieverOutput(docs)])
+    assert out == ("\n\n" + "-" * 10 +
+                   "## File Path: a.py\n\nfirst chunk\n\nsecond chunk")
