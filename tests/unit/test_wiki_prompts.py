@@ -133,6 +133,21 @@ def test_deep_dive_prompt_anchors():
     assert "NEVER use \"graph LR\"" in p
 
 
+def test_deep_dive_prompt_describes_line_numbering():
+    p = build_page_prompt("My Program", ["prog.cbl"], "en", True, *REPO)
+    # The model is told the source is pre-numbered and to cite those numbers.
+    assert "Each line in [CURRENT_FILE_CONTENT] is prefixed with its line number" in p
+    assert "Cite those exact line numbers" in p
+
+
+def test_deep_dive_prompt_forbids_fabricated_file_citations():
+    p = build_page_prompt("My Program", ["prog.cbl"], "en", True, *REPO)
+    assert "Only cite files that were actually provided" in p
+    # CALL targets must be written as program identifiers, not invented files.
+    assert "is a program name, not a file" in p
+    assert "Never fabricate a filename" in p
+
+
 def test_page_prompt_language_clause():
     p = build_page_prompt("T", ["f.py"], "zh-tw", False, *REPO)
     assert "Traditional Chinese (繁體中文)" in p

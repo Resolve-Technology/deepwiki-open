@@ -310,7 +310,7 @@ def build_page_prompt(page_title: str, file_paths: List[str], language: str,
     if deep_dive:
         return (
             "You are a senior mainframe/COBOL systems analyst producing the definitive reference analysis of one program.\n"
-            f"You are given the COMPLETE source of the program in [CURRENT_FILE_CONTENT]. Base EVERY statement strictly on that source (plus any copybook files provided). Never invent fields, paragraphs, or behavior. Cite line numbers for every claim using the format [{first_file}:start-end]().\n"
+            f"You are given the COMPLETE source of the program in [CURRENT_FILE_CONTENT]. Base EVERY statement strictly on that source (plus any copybook files provided). Never invent fields, paragraphs, or behavior. Each line in [CURRENT_FILE_CONTENT] is prefixed with its line number in the form `<number> | <code>`. Cite those exact line numbers for every claim using the format [{first_file}:start-end](); do NOT guess or renumber. Only cite files that were actually provided to you (the file(s) in the 'Relevant source files' list and any copybooks in context). Never fabricate a filename: a CALL target such as `CAL101` is a program name, not a file — write it as `CAL101`, never as a citation link like [CAL101.txt:1-10]().\n"
             "\n"
             "CRITICAL STARTING INSTRUCTION:\n"
             "The very first thing on the page MUST be a `<details>` block listing the source file(s) analyzed:\n"
@@ -353,7 +353,7 @@ def build_page_prompt(page_title: str, file_paths: List[str], language: str,
             "EVERY file-status check, INVALID KEY clause, error flag set/test, error display/abend path: table of location (paragraph + lines), condition detected, and the program's response.\n"
             "\n"
             "## 10. External Dependencies & Cross-Program Relationships\n"
-            "Called programs (CALL statements), callers if inferable from comments, shared files that couple this program to others, JCL/scheduling hints found in comments.\n"
+            "Called programs (CALL statements) — list each as its bare program identifier in `backticks` (e.g. `CAL101`); do NOT turn a called program into a file citation unless that program's own source file was actually provided. Callers if inferable from comments, shared files that couple this program to others, JCL/scheduling hints found in comments.\n"
             "\n"
             "## 11. Operational Notes & Gotchas\n"
             "Concrete, evidence-based warnings: rerun/duplicate-processing risks, sort-order assumptions, REWRITE-after-READ requirements, counter overflow limits (compute the actual limit from the PIC), locking/contention, hard-coded values that look like configuration.\n"
