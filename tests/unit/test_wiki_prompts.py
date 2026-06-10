@@ -146,6 +146,8 @@ def test_deep_dive_prompt_forbids_fabricated_file_citations():
     # CALL targets must be written as program identifiers, not invented files.
     assert "is a program name, not a file" in p
     assert "Never fabricate a filename" in p
+    # Section 10 reinforces the rule at the point of use.
+    assert "do NOT turn a called program into a file citation" in p
 
 
 def test_page_prompt_language_clause():
