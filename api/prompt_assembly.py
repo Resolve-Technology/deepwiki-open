@@ -104,21 +104,22 @@ def format_context_text(retrieved_documents) -> str:
     return "\n\n" + "-" * 10 + "\n\n".join(context_parts)
 
 
-def number_source_lines(content: str) -> str:
+def number_source_lines(content: str, start: int = 1) -> str:
     """Prefix each source line with its 1-based line number.
 
-    Deep-dive pages order the model to cite exact line numbers, but the raw
-    program source carries no line markers — the model would have to count
-    lines, which it does unreliably. Numbering the source first gives it ground
-    truth to cite. Done in the generator (not in ``assemble_envelope``) so the
-    websocket chat path stays byte-identical, and BEFORE budget-fit truncation
-    so surviving lines keep their true numbers.
+    ``start`` lets callers number a fragment by its absolute position in the
+    original file (e.g. a RAG chunk that begins at line 120). Defaults to 1 so
+    existing callers that pass whole files are unaffected.
+
+    Deep-dive pages and RAG context both order the model to cite exact line
+    numbers, but raw source/chunks carry no line markers — numbering gives it
+    ground truth to cite.
     """
     if not content:
         return ""
     return "\n".join(
         f"{n:>6} | {line}"
-        for n, line in enumerate(content.splitlines(), start=1)
+        for n, line in enumerate(content.splitlines(), start=start)
     )
 
 

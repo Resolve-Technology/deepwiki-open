@@ -133,3 +133,13 @@ def test_system_prompt_language_lookup():
     # Unknown code falls back to English, like the websocket's .get(..., "English")
     p = select_generation_system_prompt("github", "u", "r", "klingon")
     assert "respond in English language." in p
+
+
+def test_number_source_lines_custom_start():
+    out = number_source_lines("DELTA\nEPSILON", start=2)
+    assert out == "     2 | DELTA\n     3 | EPSILON"
+
+
+def test_number_source_lines_default_start_unchanged():
+    # Existing callers pass no start; must still number from 1.
+    assert number_source_lines("A\nB") == "     1 | A\n     2 | B"
