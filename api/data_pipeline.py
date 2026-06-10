@@ -24,6 +24,13 @@ logger = logging.getLogger(__name__)
 # Maximum token limit for OpenAI embedding models
 MAX_EMBEDDING_TOKENS = 8192
 
+# Per-file cap for indexing. Files are chunked by the text splitter before
+# embedding, so this only guards against pathological blobs — it must stay far
+# above real program sources (B5349.txt is ~147k tokens; the old 8192-token
+# doc-file cap silently dropped every COBOL program stored as .txt, leaving a
+# README-only index).
+MAX_INDEX_FILE_TOKENS = int(os.getenv("DEEPWIKI_MAX_INDEX_FILE_TOKENS", "400000"))
+
 # In-memory cache of deserialized embedding databases, keyed by the .pkl path.
 # Value: (mtime, documents). A wiki generation issues ~one request per page, each
 # of which would otherwise re-deserialize the same large .pkl; this reuses it.
@@ -353,7 +360,7 @@ def read_all_documents(path: str, embedder_type: str = None, is_ollama_embedder:
 
                 # Check token count
                 token_count = count_tokens(content, embedder_type)
-                if token_count > MAX_EMBEDDING_TOKENS * 10:
+                if token_count > MAX_INDEX_FILE_TOKENS:
                     logger.warning(f"Skipping large file {relative_path}: Token count ({token_count}) exceeds limit")
                     continue
 
@@ -386,7 +393,7 @@ def read_all_documents(path: str, embedder_type: str = None, is_ollama_embedder:
 
                 # Check token count
                 token_count = count_tokens(content, embedder_type)
-                if token_count > MAX_EMBEDDING_TOKENS:
+                if token_count > MAX_INDEX_FILE_TOKENS:
                     logger.warning(f"Skipping large file {relative_path}: Token count ({token_count}) exceeds limit")
                     continue
 
