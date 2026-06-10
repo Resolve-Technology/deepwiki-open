@@ -177,3 +177,11 @@ def test_format_context_text_spanless_unchanged():
     out = format_context_text([FakeRetrieverOutput(docs)])
     assert out == ("\n\n" + "-" * 10 +
                    "## File Path: a.py\n\nfirst chunk\n\nsecond chunk")
+
+
+def test_format_context_text_partial_spans_falls_back_to_plain():
+    # One chunk has start_line, one doesn't -> all() is False -> plain format.
+    docs = [SpannedDoc("a.py", "chunk A", 10, 10), FakeDoc("a.py", "chunk B")]
+    out = format_context_text([FakeRetrieverOutput(docs)])
+    assert "(lines" not in out
+    assert "## File Path: a.py\n\nchunk A\n\nchunk B" in out

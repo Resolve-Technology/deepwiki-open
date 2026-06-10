@@ -8,8 +8,10 @@ engine must reproduce that envelope byte-for-byte, so the assembly code is
 extracted here verbatim. Do NOT "clean up" the formatting — any change alters
 what the model sees versus the browser-driven flow.
 
-The websocket handler is intentionally left untouched; this is a copy, not a
-refactor (the duplication is the price of not destabilising the chat path).
+The RAG context formatting (``format_context_text``) is shared by the websocket
+chat path (``websocket_wiki.py``) and the HTTP chat path (``simple_chat.py``).
+The envelope assembly (``assemble_envelope``) remains byte-parity-locked to the
+websocket flow — do NOT "clean up" its formatting.
 """
 import logging
 
