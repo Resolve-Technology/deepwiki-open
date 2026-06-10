@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from api.config import get_model_config, configs, OPENROUTER_API_KEY, OPENAI_API_KEY, LITELLM_API_KEY, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
 from api.data_pipeline import count_tokens, get_file_content
+from api.prompt_assembly import format_context_text
 from api.prompt_fit import fit_to_budget, prompt_token_budget
 from api.openai_client import OpenAIClient
 from api.vllm_client import VLLMClient
@@ -216,30 +217,7 @@ async def chat_completions_stream(request: ChatCompletionRequest):
                     retrieved_documents = request_rag(rag_query, language=request.language)
 
                     if retrieved_documents and retrieved_documents[0].documents:
-                        # Format context for the prompt in a more structured way
-                        documents = retrieved_documents[0].documents
-                        logger.info(f"Retrieved {len(documents)} documents")
-
-                        # Group documents by file path
-                        docs_by_file = {}
-                        for doc in documents:
-                            file_path = doc.meta_data.get('file_path', 'unknown')
-                            if file_path not in docs_by_file:
-                                docs_by_file[file_path] = []
-                            docs_by_file[file_path].append(doc)
-
-                        # Format context text with file path grouping
-                        context_parts = []
-                        for file_path, docs in docs_by_file.items():
-                            # Add file header with metadata
-                            header = f"## File Path: {file_path}\n\n"
-                            # Add document content
-                            content = "\n\n".join([doc.text for doc in docs])
-
-                            context_parts.append(f"{header}{content}")
-
-                        # Join all parts with clear separation
-                        context_text = "\n\n" + "-" * 10 + "\n\n".join(context_parts)
+                        context_text = format_context_text(retrieved_documents)
                     else:
                         logger.warning("No documents retrieved from RAG")
                 except Exception as e:
