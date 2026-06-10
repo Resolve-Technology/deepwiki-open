@@ -468,13 +468,18 @@ def compute_line_span(parent_text: str, order: int, chunk_text: str, step: int):
     of the parent, so the start char (and thus start line) is derivable without
     fragile substring matching. Returns ``None`` if ``order`` runs past the end.
     """
+    if not parent_text:
+        return None
     words = parent_text.split(" ")
     start_word = order * step
     if start_word >= len(words):
         return None
     start_char = 0 if start_word == 0 else len(" ".join(words[:start_word])) + 1
     start_line = parent_text[:start_char].count("\n") + 1
-    end_line = start_line + chunk_text.count("\n")
+    # rstrip trailing line terminators: the splitter's last chunk keeps the
+    # file's final "\n", which would otherwise push end_line one line past the
+    # last line of actual content.
+    end_line = start_line + chunk_text.rstrip("\n\r").count("\n")
     return start_line, end_line
 
 
@@ -493,10 +498,12 @@ def attach_chunk_line_spans(chunks, documents, step: int = None):
         step = cfg["chunk_size"] - cfg["chunk_overlap"]
     parent_text_by_id = {str(d.id): d.text for d in documents}
     for chunk in chunks:
+        if chunk.order is None:
+            continue
         parent_text = parent_text_by_id.get(chunk.parent_doc_id)
         if parent_text is None:
             continue
-        span = compute_line_span(parent_text, chunk.order or 0, chunk.text, step)
+        span = compute_line_span(parent_text, chunk.order, chunk.text, step)
         if span is None:
             continue
         start_line, end_line = span

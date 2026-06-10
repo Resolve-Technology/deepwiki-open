@@ -47,3 +47,34 @@ def test_attach_chunk_line_spans_skips_unknown_parent():
                         meta_data={"file_path": "p"})
     attach_chunk_line_spans([c], [], step=2)
     assert "start_line" not in c.meta_data
+
+
+def test_compute_line_span_last_chunk_trailing_newline():
+    # A file ending in newline: the last word carries a trailing "\n" which must
+    # NOT inflate end_line past the last content line.
+    parent = "aaa\nbbb\n"
+    assert compute_line_span(parent, order=0, chunk_text="aaa\nbbb\n", step=2) == (1, 2)
+
+
+def test_compute_line_span_empty_parent_returns_none():
+    assert compute_line_span("", order=0, chunk_text="x", step=2) is None
+
+
+def test_attach_chunk_line_spans_skips_none_order():
+    parent = SimpleNamespace(id="P", text=PARENT)
+    c = SimpleNamespace(parent_doc_id="P", order=None, text="x",
+                        meta_data={"file_path": "p"})
+    attach_chunk_line_spans([c], [parent], step=2)
+    assert "start_line" not in c.meta_data
+
+
+def test_attach_chunk_line_spans_uses_config_step(monkeypatch):
+    import api.data_pipeline as dp
+    monkeypatch.setitem(dp.configs["text_splitter"], "split_by", "word")
+    monkeypatch.setitem(dp.configs["text_splitter"], "chunk_size", 3)
+    monkeypatch.setitem(dp.configs["text_splitter"], "chunk_overlap", 1)
+    parent = SimpleNamespace(id="P", text=PARENT)  # step = 3-1 = 2
+    c = SimpleNamespace(parent_doc_id="P", order=1,
+                        text="delta\nepsilon zeta", meta_data={"file_path": "p"})
+    attach_chunk_line_spans([c], [parent])  # no explicit step -> from config
+    assert c.meta_data["start_line"] == 2 and c.meta_data["end_line"] == 3
