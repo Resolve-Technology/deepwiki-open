@@ -459,6 +459,52 @@ def prepare_data_pipeline(embedder_type: str = None, is_ollama_embedder: bool = 
     )  # sequential will chain together splitter and embedder
     return data_transformer
 
+def compute_line_span(parent_text: str, order: int, chunk_text: str, step: int):
+    """Absolute (start_line, end_line) of a word-split chunk within its parent.
+
+    adalflow's word splitter windows the parent's space-separated words with a
+    stride of ``step = chunk_size - chunk_overlap``; chunk ``order`` therefore
+    begins at word index ``order * step``. The chunk text is an exact substring
+    of the parent, so the start char (and thus start line) is derivable without
+    fragile substring matching. Returns ``None`` if ``order`` runs past the end.
+    """
+    words = parent_text.split(" ")
+    start_word = order * step
+    if start_word >= len(words):
+        return None
+    start_char = 0 if start_word == 0 else len(" ".join(words[:start_word])) + 1
+    start_line = parent_text[:start_char].count("\n") + 1
+    end_line = start_line + chunk_text.count("\n")
+    return start_line, end_line
+
+
+def attach_chunk_line_spans(chunks, documents, step: int = None):
+    """Write start_line/end_line into each chunk's metadata (fresh dict).
+
+    Only valid for word splitting; a no-op for other split_by modes. ``step``
+    defaults to the configured ``chunk_size - chunk_overlap``. A FRESH meta_data
+    dict is assigned per chunk because adalflow shares one dict across all of a
+    parent's chunks — in-place mutation would make them clobber each other.
+    """
+    cfg = configs["text_splitter"]
+    if cfg.get("split_by") != "word":
+        return chunks
+    if step is None:
+        step = cfg["chunk_size"] - cfg["chunk_overlap"]
+    parent_text_by_id = {str(d.id): d.text for d in documents}
+    for chunk in chunks:
+        parent_text = parent_text_by_id.get(chunk.parent_doc_id)
+        if parent_text is None:
+            continue
+        span = compute_line_span(parent_text, chunk.order or 0, chunk.text, step)
+        if span is None:
+            continue
+        start_line, end_line = span
+        chunk.meta_data = {**chunk.meta_data,
+                           "start_line": start_line, "end_line": end_line}
+    return chunks
+
+
 def transform_documents_and_save_to_db(
     documents: List[Document], db_path: str, embedder_type: str = None, is_ollama_embedder: bool = None
 ) -> LocalDB:
@@ -481,6 +527,9 @@ def transform_documents_and_save_to_db(
     db.register_transformer(transformer=data_transformer, key="split_and_embed")
     db.load(documents)
     db.transform(key="split_and_embed")
+    # Tag each chunk with its source line span so retrieved RAG context can be
+    # cited with real line numbers (see format_context_text).
+    attach_chunk_line_spans(db.get_transformed_data(key="split_and_embed"), documents)
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     db.save_state(filepath=db_path)
     return db
