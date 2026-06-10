@@ -326,21 +326,56 @@ def test_deep_dive_file_injection(monkeypatch):
     assert ("Contexts related to prog.cbl", "en") in FakeRAG.instances[0].queries
 
 
-def test_deep_dive_file_fetch_failure_proceeds(monkeypatch):
+def test_deep_dive_remote_fetch_failure_fails_page(tmp_path, monkeypatch):
     xml = """<wiki_structure><title>T</title><description>D</description><pages>
       <page id="page-analysis-prog"><title>Prog Analysis</title>
         <relevant_files><file_path>prog.cbl</file_path></relevant_files></page>
     </pages></wiki_structure>"""
+    def boom(*a, **k):
+        raise ValueError("fetch failed")
+    monkeypatch.setattr(wiki_generator, "get_file_content", boom)
+    job = make_job(self_review=False)  # github
+    dispatch = FakeDispatch([xml])     # page must NOT reach the model
+    run(run_generation(job, dispatch))
 
+    content = read_cache(tmp_path, job)["generated_pages"]["page-analysis-prog"]["content"]
+    assert content.startswith("Error generating content:")
+    assert "could not be loaded" in content
+    assert len(dispatch.prompts) == 1  # only the structure prompt was dispatched
+    assert job.progress.phase == "done"
+
+
+def test_deep_dive_remote_empty_string_fails_page(tmp_path, monkeypatch):
+    xml = """<wiki_structure><title>T</title><description>D</description><pages>
+      <page id="page-analysis-prog"><title>Prog Analysis</title>
+        <relevant_files><file_path>prog.cbl</file_path></relevant_files></page>
+    </pages></wiki_structure>"""
+    monkeypatch.setattr(wiki_generator, "get_file_content", lambda *a, **k: "")
+    job = make_job(self_review=False)  # github
+    dispatch = FakeDispatch([xml])
+    run(run_generation(job, dispatch))
+
+    content = read_cache(tmp_path, job)["generated_pages"]["page-analysis-prog"]["content"]
+    assert content.startswith("Error generating content:")
+    assert len(dispatch.prompts) == 1
+
+
+def test_deep_dive_local_repo_proceeds_without_source(tmp_path, monkeypatch):
+    xml = """<wiki_structure><title>T</title><description>D</description><pages>
+      <page id="page-analysis-prog"><title>Prog Analysis</title>
+        <relevant_files><file_path>prog.cbl</file_path></relevant_files></page>
+    </pages></wiki_structure>"""
     def boom(*a, **k):
         raise ValueError("local repos unsupported")
     monkeypatch.setattr(wiki_generator, "get_file_content", boom)
-    job = make_job(self_review=False)
+    local_repo = RepoInfo(owner="o", repo="r", type="local",
+                          localPath="/tmp/x", repoUrl="https://example/o/r")
+    job = make_job(repo=local_repo, self_review=False)
     dispatch = FakeDispatch([xml, PAGE_BODY])
-
     run(run_generation(job, dispatch))
 
     assert "<currentFileContent" not in dispatch.prompts[1]
+    assert read_cache(tmp_path, job)["generated_pages"]["page-analysis-prog"]["content"] == PAGE_BODY
     assert job.progress.phase == "done"
 
 

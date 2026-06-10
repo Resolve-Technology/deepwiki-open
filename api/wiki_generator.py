@@ -366,6 +366,15 @@ async def run_generation(
                 except Exception as e:
                     logger.error(f"Error retrieving file content: {str(e)}")
                     file_content, file_path = "", ""
+                # A deep-dive page is the definitive analysis of ONE program;
+                # without its source the model fabricates line numbers and
+                # filenames. Fail the page rather than generate from nothing —
+                # but only for remote repo types where the source was fetchable
+                # (local repos never inject and proceed as before).
+                if not file_content and repo.type in ("github", "gitlab", "bitbucket"):
+                    raise RuntimeError(
+                        f"deep-dive source {requested_file_path} could not be loaded "
+                        "(empty content); refusing to generate an ungrounded page")
             # Page prompts are usually under the 8000-token gate, so the
             # browser flow retrieved for them (filePath-focused query on
             # deep-dives, the message itself otherwise) — reproduce that.
