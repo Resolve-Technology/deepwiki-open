@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { ThemeProvider } from "next-themes";
 import { LanguageProvider } from "@/contexts/LanguageContext";
+import { APP_VERSION } from "@/version";
 
 export const metadata: Metadata = {
   title: "Deepwiki Open Source | Sheing Ng",
@@ -29,6 +30,10 @@ export default function RootLayout({
             {children}
           </LanguageProvider>
         </ThemeProvider>
+        {/* Build version — visible on every page, including generation screens */}
+        <div className="fixed bottom-1.5 right-2 z-50 pointer-events-none select-none text-[10px] text-[var(--muted)] opacity-60">
+          Resolve Fork · v{APP_VERSION}
+        </div>
       </body>
     </html>
   );

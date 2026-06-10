@@ -7,9 +7,11 @@ import { FaWikipediaW, FaGithub, FaCoffee, FaTwitter } from 'react-icons/fa';
 import ThemeToggle from '@/components/theme-toggle';
 import Mermaid from '../components/Mermaid';
 import ConfigurationModal from '@/components/ConfigurationModal';
+import JobsPanel from '@/components/JobsPanel';
 import ProcessedProjects from '@/components/ProcessedProjects';
 import { extractUrlPath, extractUrlDomain } from '@/utils/urlDecoder';
 import { useProcessedProjects } from '@/hooks/useProcessedProjects';
+import { APP_VERSION } from '@/version';
 
 import { useLanguage } from '@/contexts/LanguageContext';
 
@@ -129,6 +131,9 @@ export default function Home() {
 
   // Wiki type state - default to comprehensive view
   const [isComprehensiveView, setIsComprehensiveView] = useState<boolean>(true);
+
+  // Self-review pass: verify each generated page against the code (default on)
+  const [isSelfReviewEnabled, setIsSelfReviewEnabled] = useState<boolean>(true);
 
   const [excludedDirs, setExcludedDirs] = useState('');
   const [excludedFiles, setExcludedFiles] = useState('');
@@ -382,7 +387,74 @@ export default function Home() {
     // Add comprehensive parameter
     params.append('comprehensive', isComprehensiveView.toString());
 
+    // Self-review pass toggle (the wiki page defaults to true when absent)
+    params.append('self_review', isSelfReviewEnabled.toString());
+
     const queryString = params.toString() ? `?${params.toString()}` : '';
+
+    // Generation now runs server-side: enqueue a job (only when no cached wiki
+    // exists for this version — opening an already-generated wiki must not
+    // re-spend tokens), then navigate; the wiki page attaches to the job and
+    // polls its progress. A 409 means a job is already running — just navigate.
+    const repoType = (type === 'local' ? type : selectedPlatform) || 'github';
+    try {
+      let hasCache = false;
+      try {
+        const cacheParams = new URLSearchParams({
+          owner, repo, repo_type: repoType, language: selectedLanguage,
+          provider, model,
+        });
+        const cacheResponse = await fetch(`/api/wiki_cache?${cacheParams.toString()}`);
+        if (cacheResponse.ok) {
+          const cached = await cacheResponse.json();
+          hasCache = !!(cached && cached.wiki_structure && cached.generated_pages
+            && Object.keys(cached.generated_pages).length > 0);
+        }
+      } catch (err) {
+        console.warn('Cache check failed, proceeding to enqueue:', err);
+      }
+
+      if (!hasCache) {
+        const jobResponse = await fetch('/api/wiki_jobs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            repo: {
+              owner,
+              repo,
+              type: repoType,
+              token: accessToken || null,
+              localPath: localPath || null,
+              repoUrl: localPath ? null : repositoryInput,
+            },
+            language: selectedLanguage,
+            provider,
+            model,
+            comprehensive: isComprehensiveView,
+            self_review: isSelfReviewEnabled,
+            force_regenerate: false,
+            excluded_dirs: excludedDirs || undefined,
+            excluded_files: excludedFiles || undefined,
+            included_dirs: includedDirs || undefined,
+            included_files: includedFiles || undefined,
+            authorization_code: authCode || undefined,
+          }),
+        });
+        if (!jobResponse.ok && jobResponse.status !== 409) {
+          const errorText = await jobResponse.text().catch(() => 'No error details available');
+          setError(`Failed to start generation (${jobResponse.status}): ${errorText}`);
+          setIsSubmitting(false);
+          setIsConfigModalOpen(false);
+          return;
+        }
+      }
+    } catch (err) {
+      console.error('Error enqueueing generation job:', err);
+      setError(err instanceof Error ? err.message : 'Failed to start generation');
+      setIsSubmitting(false);
+      setIsConfigModalOpen(false);
+      return;
+    }
 
     // Navigate to the dynamic route
     router.push(`/${owner}/${repo}${queryString}`);
@@ -450,6 +522,8 @@ export default function Home() {
             supportedLanguages={supportedLanguages}
             isComprehensiveView={isComprehensiveView}
             setIsComprehensiveView={setIsComprehensiveView}
+            isSelfReviewEnabled={isSelfReviewEnabled}
+            setIsSelfReviewEnabled={setIsSelfReviewEnabled}
             provider={provider}
             setProvider={setProvider}
             model={model}
@@ -484,6 +558,9 @@ export default function Home() {
       <main className="flex-1 max-w-6xl mx-auto w-full overflow-y-auto">
         <div
           className="min-h-full flex flex-col items-center p-8 pt-10 bg-[var(--card-bg)] rounded-lg shadow-custom card-japanese">
+
+          {/* Queued/running server-side generations (hidden when there are none) */}
+          <JobsPanel authCode={authCode} className="w-full mb-6" />
 
           {/* Conditionally show processed projects or welcome content */}
           {!projectsLoading && projects.length > 0 ? (
@@ -599,7 +676,9 @@ export default function Home() {
       <footer className="max-w-6xl mx-auto mt-8 flex flex-col gap-4 w-full">
         <div
           className="flex flex-col sm:flex-row justify-between items-center gap-4 bg-[var(--card-bg)] rounded-lg p-4 border border-[var(--border-color)] shadow-custom">
-          <p className="text-[var(--muted)] text-sm font-serif">{t('footer.copyright')}</p>
+          <p className="text-[var(--muted)] text-sm font-serif">
+            {t('footer.copyright')} <span className="opacity-70">· Resolve Fork · v{APP_VERSION}</span>
+          </p>
 
           <div className="flex items-center gap-6">
             <div className="flex items-center space-x-5">

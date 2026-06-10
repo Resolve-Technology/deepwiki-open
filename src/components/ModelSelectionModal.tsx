@@ -18,10 +18,13 @@ interface ModelSelectionModalProps {
   customModel: string;
   setCustomModel: (value: string) => void;
   onApply: (token?: string) => void;
+  onForceRegenerate?: (token?: string, provider?: string, model?: string) => void;
 
   // Wiki type options
   isComprehensiveView: boolean;
   setIsComprehensiveView: (value: boolean) => void;
+  isSelfReviewEnabled?: boolean;
+  setIsSelfReviewEnabled?: (value: boolean) => void;
 
   // File filter options - optional
   excludedDirs?: string;
@@ -57,8 +60,11 @@ export default function ModelSelectionModal({
   customModel,
   setCustomModel,
   onApply,
+  onForceRegenerate,
   isComprehensiveView,
   setIsComprehensiveView,
+  isSelfReviewEnabled = true,
+  setIsSelfReviewEnabled,
   excludedDirs = '',
   setExcludedDirs,
   excludedFiles = '',
@@ -84,6 +90,7 @@ export default function ModelSelectionModal({
   const [localIsCustomModel, setLocalIsCustomModel] = useState(isCustomModel);
   const [localCustomModel, setLocalCustomModel] = useState(customModel);
   const [localIsComprehensiveView, setLocalIsComprehensiveView] = useState(isComprehensiveView);
+  const [localIsSelfReviewEnabled, setLocalIsSelfReviewEnabled] = useState(isSelfReviewEnabled);
   const [localExcludedDirs, setLocalExcludedDirs] = useState(excludedDirs);
   const [localExcludedFiles, setLocalExcludedFiles] = useState(excludedFiles);
   const [localIncludedDirs, setLocalIncludedDirs] = useState(includedDirs);
@@ -102,6 +109,7 @@ export default function ModelSelectionModal({
       setLocalIsCustomModel(isCustomModel);
       setLocalCustomModel(customModel);
       setLocalIsComprehensiveView(isComprehensiveView);
+      setLocalIsSelfReviewEnabled(isSelfReviewEnabled);
       setLocalExcludedDirs(excludedDirs);
       setLocalExcludedFiles(excludedFiles);
       setLocalIncludedDirs(includedDirs);
@@ -110,26 +118,37 @@ export default function ModelSelectionModal({
       setLocalAccessToken('');
       setShowTokenSection(showTokenInput);
     }
-  }, [isOpen, provider, model, isCustomModel, customModel, isComprehensiveView, excludedDirs, excludedFiles, includedDirs, includedFiles, repositoryType, showTokenInput]);
+  }, [isOpen, provider, model, isCustomModel, customModel, isComprehensiveView, isSelfReviewEnabled, excludedDirs, excludedFiles, includedDirs, includedFiles, repositoryType, showTokenInput]);
 
-  // Handler for applying changes
-  const handleApply = () => {
+  // Commits the local form state to the parent and returns the token (if any)
+  const commitSelections = () => {
     setProvider(localProvider);
     setModel(localModel);
     setIsCustomModel(localIsCustomModel);
     setCustomModel(localCustomModel);
     setIsComprehensiveView(localIsComprehensiveView);
+    if (setIsSelfReviewEnabled) setIsSelfReviewEnabled(localIsSelfReviewEnabled);
     if (setExcludedDirs) setExcludedDirs(localExcludedDirs);
     if (setExcludedFiles) setExcludedFiles(localExcludedFiles);
     if (setIncludedDirs) setIncludedDirs(localIncludedDirs);
     if (setIncludedFiles) setIncludedFiles(localIncludedFiles);
-    
-    // Pass token to onApply if needed
-    if (showTokenInput) {
-      onApply(localAccessToken);
-    } else {
-      onApply();
-    }
+    return showTokenInput ? localAccessToken : undefined;
+  };
+
+  // Handler for applying changes (loads the saved wiki for this model if one exists)
+  const handleApply = () => {
+    const token = commitSelections();
+    onApply(token);
+    onClose();
+  };
+
+  // Handler for forcing regeneration (deletes this model's saved wiki first)
+  const handleForceRegenerate = () => {
+    const token = commitSelections();
+    // Pass the just-committed selections explicitly: the parent's state hasn't
+    // re-rendered yet, so its confirmRefresh closure would otherwise see the
+    // previous provider/model and delete the wrong version's cache.
+    onForceRegenerate?.(token, localProvider, localModel);
     onClose();
   };
 
@@ -164,6 +183,17 @@ export default function ModelSelectionModal({
                     setIsComprehensiveView={setLocalIsComprehensiveView}
                 />
             }
+            {showWikiType && (
+              <label className="mt-3 flex items-center gap-2 text-sm text-[var(--foreground)] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={localIsSelfReviewEnabled}
+                  onChange={(e) => setLocalIsSelfReviewEnabled(e.target.checked)}
+                  className="accent-[var(--accent-primary)]"
+                />
+                Self-review pages against code (second pass, ~2x tokens)
+              </label>
+            )}
 
             {/* Divider */}
             <div className="my-4 border-t border-[var(--border-color)]/30"></div>
@@ -244,6 +274,16 @@ export default function ModelSelectionModal({
             >
               {t.common?.cancel || 'Cancel'}
             </button>
+            {onForceRegenerate && (
+              <button
+                type="button"
+                onClick={handleForceRegenerate}
+                title={t.form?.regenerateTooltip || 'Discard this model\'s saved wiki and generate it again on the server'}
+                className="px-4 py-2 text-sm font-medium rounded-md border border-[var(--accent-primary)]/50 text-[var(--accent-primary)] bg-transparent hover:bg-[var(--accent-primary)]/10 transition-colors"
+              >
+                {t.form?.regenerate || 'Regenerate'}
+              </button>
+            )}
             <button
               type="button"
               onClick={handleApply}

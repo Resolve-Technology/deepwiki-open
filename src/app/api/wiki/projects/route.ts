@@ -9,6 +9,9 @@ interface ApiProcessedProject {
   repo_type: string;
   submittedAt: number;
   language: string;
+  provider?: string;
+  model?: string;
+  stats?: Record<string, unknown>;
 }
 // Payload for deleting a project cache
 interface DeleteProjectCachePayload {
@@ -16,18 +19,21 @@ interface DeleteProjectCachePayload {
   repo: string;
   repo_type: string;
   language: string;
+  provider?: string; // when present (with model), delete only that version
+  model?: string;
 }
 
 /** Type guard to validate DeleteProjectCachePayload at runtime */
 function isDeleteProjectCachePayload(obj: unknown): obj is DeleteProjectCachePayload {
-  return (
-    obj != null &&
-    typeof obj === 'object' &&
-    'owner' in obj && typeof (obj as Record<string, unknown>).owner === 'string' && ((obj as Record<string, unknown>).owner as string).trim() !== '' &&
-    'repo' in obj && typeof (obj as Record<string, unknown>).repo === 'string' && ((obj as Record<string, unknown>).repo as string).trim() !== '' &&
-    'repo_type' in obj && typeof (obj as Record<string, unknown>).repo_type === 'string' && ((obj as Record<string, unknown>).repo_type as string).trim() !== '' &&
-    'language' in obj && typeof (obj as Record<string, unknown>).language === 'string' && ((obj as Record<string, unknown>).language as string).trim() !== ''
+  if (obj == null || typeof obj !== 'object') return false;
+  const rec = obj as Record<string, unknown>;
+  const requiredOk = (['owner', 'repo', 'repo_type', 'language'] as const).every(
+    (key) => typeof rec[key] === 'string' && (rec[key] as string).trim() !== ''
   );
+  const optionalOk = (['provider', 'model'] as const).every(
+    (key) => rec[key] === undefined || typeof rec[key] === 'string'
+  );
+  return requiredOk && optionalOk;
 }
 
 // Ensure this matches your Python backend configuration
@@ -81,8 +87,12 @@ export async function DELETE(request: Request) {
         { status: 400 }
       );
     }
-    const { owner, repo, repo_type, language } = body;
+    const { owner, repo, repo_type, language, provider, model } = body;
     const params = new URLSearchParams({ owner, repo, repo_type, language });
+    if (provider && model) {
+      params.set('provider', provider);
+      params.set('model', model);
+    }
     const response = await fetch(`${CACHE_API_ENDPOINT}?${params}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },

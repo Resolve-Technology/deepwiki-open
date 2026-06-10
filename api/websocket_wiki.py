@@ -19,10 +19,14 @@ from api.config import (
     AWS_SECRET_ACCESS_KEY,
 )
 from api.data_pipeline import count_tokens, get_file_content
+from api.prompt_fit import fit_to_budget, prompt_token_budget
+from api.prompt_assembly import format_context_text
 from api.bedrock_client import BedrockClient
 from api.openai_client import OpenAIClient
 from api.litellm_client import LiteLLMClient
 from api.vllm_client import VLLMClient
+from api.anthropic_client import AnthropicClient
+from api.vllm_discovery import get_vllm_route
 from api.openrouter_client import OpenRouterClient
 from api.azureai_client import AzureAIClient
 from api.dashscope_client import DashscopeClient
@@ -56,6 +60,8 @@ class ChatCompletionRequest(BaseModel):
         description="Model provider (google, openai, openrouter, ollama, bedrock, azure, dashscope)",
     )
     model: Optional[str] = Field(None, description="Model name for the specified provider")
+    rag_query: Optional[str] = Field(None, description="Optional short query used for RAG retrieval instead of the last message; lets oversized prompts still receive repository context")
+    include_usage: Optional[bool] = Field(False, description="Append a <<<USAGE_JSON:...>>> trailer with token counts after the stream (callers must strip it from the content)")
 
     language: Optional[str] = Field("en", description="Language for content generation (e.g., 'en', 'ja', 'zh', 'es', 'kr', 'vi')")
     excluded_dirs: Optional[str] = Field(None, description="Comma-separated list of directories to exclude from processing")
@@ -196,14 +202,18 @@ async def handle_websocket_chat(websocket: WebSocket):
         context_text = ""
         retrieved_documents = None
 
-        if not input_too_large:
+        if not input_too_large or request.rag_query:
             try:
-                # If filePath exists, modify the query for RAG to focus on the file
-                rag_query = query
-                if request.filePath:
-                    # Use the file path to get relevant context about the file
+                # Choose the retrieval query: an explicit short rag_query wins,
+                # then a filePath-focused query, then the message itself.
+                if request.rag_query:
+                    rag_query = request.rag_query
+                    logger.info("Using explicit rag_query for retrieval")
+                elif request.filePath:
                     rag_query = f"Contexts related to {request.filePath}"
                     logger.info(f"Modified RAG query to focus on file: {request.filePath}")
+                else:
+                    rag_query = query
 
                 # Try to perform RAG retrieval
                 try:
@@ -211,30 +221,7 @@ async def handle_websocket_chat(websocket: WebSocket):
                     retrieved_documents = request_rag(rag_query, language=request.language)
 
                     if retrieved_documents and retrieved_documents[0].documents:
-                        # Format context for the prompt in a more structured way
-                        documents = retrieved_documents[0].documents
-                        logger.info(f"Retrieved {len(documents)} documents")
-
-                        # Group documents by file path
-                        docs_by_file = {}
-                        for doc in documents:
-                            file_path = doc.meta_data.get('file_path', 'unknown')
-                            if file_path not in docs_by_file:
-                                docs_by_file[file_path] = []
-                            docs_by_file[file_path].append(doc)
-
-                        # Format context text with file path grouping
-                        context_parts = []
-                        for file_path, docs in docs_by_file.items():
-                            # Add file header with metadata
-                            header = f"## File Path: {file_path}\n\n"
-                            # Add document content
-                            content = "\n\n".join([doc.text for doc in docs])
-
-                            context_parts.append(f"{header}{content}")
-
-                        # Join all parts with clear separation
-                        context_text = "\n\n" + "-" * 10 + "\n\n".join(context_parts)
+                        context_text = format_context_text(retrieved_documents)
                     else:
                         logger.warning("No documents retrieved from RAG")
                 except Exception as e:
@@ -417,6 +404,17 @@ This file contains...
             if not isinstance(turn_id, int) and hasattr(turn, 'user_query') and hasattr(turn, 'assistant_response'):
                 conversation_history += f"<turn>\n<user>{turn.user_query.query_str}</user>\n<assistant>{turn.assistant_response.response_str}</assistant>\n</turn>\n"
 
+        # Fit oversized inputs (full program sources) to the provider's context budget
+        file_content, context_text = fit_to_budget(
+            file_content=file_content,
+            context_text=context_text,
+            base_tokens=count_tokens(
+                system_prompt + conversation_history + query,
+                is_ollama_embedder=(request.provider == "ollama"),
+            ),
+            budget=prompt_token_budget(request.provider),
+        )
+
         # Create the prompt with context
         prompt = f"/no_think {system_prompt}\n\n"
 
@@ -533,10 +531,13 @@ This file contains...
                 model_type=ModelType.LLM
             )
         elif request.provider == "vllm":
-            logger.info(f"Using vLLM (Openai protocol) with model: {request.model}")
+            # Route to whichever scanned server serves this model; fall back to
+            # the configured VLLM_API_BASE_URL when discovery hasn't seen it.
+            vllm_route = get_vllm_route(request.model)
+            logger.info(f"Using vLLM (Openai protocol) with model: {request.model} via {vllm_route or 'default base URL'}")
 
             # Initialize vLLM client (OpenAI-compatible; api key defaults to "dummy")
-            model = VLLMClient()
+            model = VLLMClient(base_url=vllm_route) if vllm_route else VLLMClient()
             model_kwargs = {
                 "model": request.model,
                 "stream": True,
@@ -545,6 +546,36 @@ This file contains...
             # Only add top_p if it exists in the model config
             if "top_p" in model_config:
                 model_kwargs["top_p"] = model_config["top_p"]
+            if request.include_usage:
+                model_kwargs["include_usage_marker"] = True
+
+            api_kwargs = model.convert_inputs_to_api_kwargs(
+                input=prompt,
+                model_kwargs=model_kwargs,
+                model_type=ModelType.LLM
+            )
+        elif request.provider == "claude":
+            logger.info(f"Using Claude (native Anthropic SDK) with model: {request.model}")
+
+            # OAuth bearer token from `claude setup-token` (CLAUDE_OAUTH_TOKEN)
+            model = AnthropicClient()
+            model_kwargs = {
+                "model": request.model,
+            }
+            # Only add sampling params / max_tokens / thinking if present in the
+            # model config. NOTE: Opus 4.7+ removed temperature/top_p/top_k (the
+            # API returns 400), so those models must not have them in
+            # generator.json; "thinking": "adaptive" is recommended there instead.
+            if "temperature" in model_config:
+                model_kwargs["temperature"] = model_config["temperature"]
+            if "top_p" in model_config:
+                model_kwargs["top_p"] = model_config["top_p"]
+            if "max_tokens" in model_config:
+                model_kwargs["max_tokens"] = model_config["max_tokens"]
+            if "thinking" in model_config:
+                model_kwargs["thinking"] = model_config["thinking"]
+            if request.include_usage:
+                model_kwargs["include_usage_marker"] = True
 
             api_kwargs = model.convert_inputs_to_api_kwargs(
                 input=prompt,
@@ -686,7 +717,7 @@ This file contains...
                     await websocket.send_text(error_msg)
                     # Close the WebSocket connection after sending the error message
                     await websocket.close()
-            elif request.provider in ("litellm", "vllm"):
+            elif request.provider in ("litellm", "vllm", "claude"):
                 try:
                     # Get the response and handle it properly using the previously created api_kwargs
                     logger.info("Making LiteLLM API call")
@@ -861,7 +892,7 @@ This file contains...
                             logger.error(f"Error with Openai API fallback: {str(e_fallback)}")
                             error_msg = f"\nError with Openai API fallback: {str(e_fallback)}\n\nPlease check that you have set the OPENAI_API_KEY environment variable with a valid API key."
                             await websocket.send_text(error_msg)
-                    elif request.provider in ("litellm", "vllm"):
+                    elif request.provider in ("litellm", "vllm", "claude"):
                         try:
                             # Create new api_kwargs with the simplified prompt
                             fallback_api_kwargs = model.convert_inputs_to_api_kwargs(

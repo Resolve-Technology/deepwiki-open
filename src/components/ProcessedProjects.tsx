@@ -5,6 +5,12 @@ import Link from 'next/link';
 import { FaTimes, FaTh, FaList } from 'react-icons/fa';
 
 // Interface should match the structure from the API
+interface PhaseStats {
+  input_tokens: number;
+  output_tokens: number;
+  seconds: number;
+}
+
 interface ProcessedProject {
   id: string;
   owner: string;
@@ -13,7 +19,41 @@ interface ProcessedProject {
   repo_type: string;
   submittedAt: number;
   language: string;
+  provider?: string;
+  model?: string;
+  stats?: {
+    generation?: PhaseStats;
+    review?: PhaseStats;
+  };
 }
+
+const formatTokens = (stats: PhaseStats): string => {
+  const total = stats.input_tokens + stats.output_tokens;
+  return total >= 1000 ? `${Math.round(total / 1000)}k` : `${total}`;
+};
+
+const formatDuration = (seconds: number): string => {
+  if (seconds >= 60) {
+    return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  }
+  return `${seconds}s`;
+};
+
+const hasPhaseData = (phase?: PhaseStats): phase is PhaseStats =>
+  !!phase && (phase.input_tokens + phase.output_tokens > 0 || phase.seconds > 0);
+
+/** "Pass 1: 459k tok · 17m 3s — Review: 242k tok · 12m 40s" */
+const formatStats = (stats: ProcessedProject['stats']): string | null => {
+  if (!stats) return null;
+  const parts: string[] = [];
+  if (hasPhaseData(stats.generation)) {
+    parts.push(`Pass 1: ${formatTokens(stats.generation)} tok · ${formatDuration(stats.generation.seconds)}`);
+  }
+  if (hasPhaseData(stats.review)) {
+    parts.push(`Review: ${formatTokens(stats.review)} tok · ${formatDuration(stats.review.seconds)}`);
+  }
+  return parts.length > 0 ? parts.join(' — ') : null;
+};
 
 interface ProcessedProjectsProps {
   showHeader?: boolean;
@@ -87,11 +127,13 @@ export default function ProcessedProjects({
     }
 
     const query = searchQuery.toLowerCase();
-    const filtered = projects.filter(project => 
+    const filtered = projects.filter(project =>
       project.name.toLowerCase().includes(query) ||
       project.owner.toLowerCase().includes(query) ||
       project.repo.toLowerCase().includes(query) ||
-      project.repo_type.toLowerCase().includes(query)
+      project.repo_type.toLowerCase().includes(query) ||
+      (project.model ?? '').toLowerCase().includes(query) ||
+      (project.provider ?? '').toLowerCase().includes(query)
     );
 
     return maxItems ? filtered.slice(0, maxItems) : filtered;
@@ -102,7 +144,11 @@ export default function ProcessedProjects({
   };
 
   const handleDelete = async (project: ProcessedProject) => {
-    if (!confirm(`Are you sure you want to delete project ${project.name}?`)) {
+    const hasVersion = !!(project.provider && project.model);
+    const versionLabel = hasVersion
+      ? ` (${project.provider}/${project.model})`
+      : ' (all saved versions)';
+    if (!confirm(`Are you sure you want to delete project ${project.name}${versionLabel}?`)) {
       return;
     }
     try {
@@ -114,18 +160,30 @@ export default function ProcessedProjects({
           repo: project.repo,
           repo_type: project.repo_type,
           language: project.language,
+          ...(hasVersion ? { provider: project.provider, model: project.model } : {}),
         }),
       });
       if (!response.ok) {
         const errorBody = await response.json().catch(() => ({ error: response.statusText }));
         throw new Error(errorBody.error || response.statusText);
       }
-      setProjects(prev => prev.filter(p => p.id !== project.id));
+      // A version row deletes only itself; a legacy row deletes ALL of the repo's
+      // cache files server-side, so drop every sibling row for that repo too.
+      setProjects(prev => hasVersion
+        ? prev.filter(p => p.id !== project.id)
+        : prev.filter(p => !(p.owner === project.owner && p.repo === project.repo &&
+            p.repo_type === project.repo_type && p.language === project.language)));
     } catch (e: unknown) {
       console.error('Failed to delete project:', e);
       alert(`Failed to delete project: ${e instanceof Error ? e.message : 'Unknown error'}`);
     }
   };
+
+  const projectHref = (project: ProcessedProject) =>
+    `/${project.owner}/${project.repo}?type=${project.repo_type}&language=${project.language}` +
+    (project.provider && project.model
+      ? `&provider=${encodeURIComponent(project.provider)}&model=${encodeURIComponent(project.model)}`
+      : '');
 
   return (
     <div className={`${className}`}>
@@ -205,7 +263,7 @@ export default function ProcessedProjects({
                   <FaTimes className="h-4 w-4" />
                 </button>
                 <Link
-                  href={`/${project.owner}/${project.repo}?type=${project.repo_type}&language=${project.language}`}
+                  href={projectHref(project)}
                   className="block"
                 >
                   <h3 className="text-lg font-semibold text-[var(--link-color)] hover:underline mb-2 line-clamp-2">
@@ -218,10 +276,20 @@ export default function ProcessedProjects({
                     <span className="px-2 py-1 text-xs bg-[var(--background)] text-[var(--muted)] rounded-full border border-[var(--border-color)]">
                       {project.language}
                     </span>
+                    {project.provider && project.model && (
+                      <span className="px-2 py-1 text-xs bg-[var(--background)] text-[var(--muted)] rounded-full border border-[var(--border-color)]" title={`Generated by ${project.provider}/${project.model}`}>
+                        {project.provider}/{project.model}
+                      </span>
+                    )}
                   </div>
                   <p className="text-xs text-[var(--muted)]">
                     {t('processedOn')} {new Date(project.submittedAt).toLocaleDateString()}
                   </p>
+                  {formatStats(project.stats) && (
+                    <p className="text-xs text-[var(--muted)] mt-1">
+                      {formatStats(project.stats)}
+                    </p>
+                  )}
                 </Link>
               </div>
             ) : (
@@ -235,7 +303,7 @@ export default function ProcessedProjects({
                   <FaTimes className="h-4 w-4" />
                 </button>
                 <Link
-                  href={`/${project.owner}/${project.repo}?type=${project.repo_type}&language=${project.language}`}
+                  href={projectHref(project)}
                   className="flex items-center justify-between"
                 >
                   <div className="flex-1 min-w-0">
@@ -243,7 +311,7 @@ export default function ProcessedProjects({
                       {project.name}
                     </h3>
                     <p className="text-xs text-[var(--muted)] mt-1">
-                      {t('processedOn')} {new Date(project.submittedAt).toLocaleDateString()} • {project.repo_type} • {project.language}
+                      {t('processedOn')} {new Date(project.submittedAt).toLocaleDateString()} • {project.repo_type} • {project.language}{project.provider && project.model ? ` • ${project.provider}/${project.model}` : ''}{formatStats(project.stats) ? ` • ${formatStats(project.stats)}` : ''}
                     </p>
                   </div>
                   <div className="flex gap-2 ml-4">

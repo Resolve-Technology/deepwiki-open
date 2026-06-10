@@ -24,6 +24,13 @@ logger = logging.getLogger(__name__)
 # Maximum token limit for OpenAI embedding models
 MAX_EMBEDDING_TOKENS = 8192
 
+# Per-file cap for indexing. Files are chunked by the text splitter before
+# embedding, so this only guards against pathological blobs — it must stay far
+# above real program sources (B5349.txt is ~147k tokens; the old 8192-token
+# doc-file cap silently dropped every COBOL program stored as .txt, leaving a
+# README-only index).
+MAX_INDEX_FILE_TOKENS = int(os.getenv("DEEPWIKI_MAX_INDEX_FILE_TOKENS", "400000"))
+
 # In-memory cache of deserialized embedding databases, keyed by the .pkl path.
 # Value: (mtime, documents). A wiki generation issues ~one request per page, each
 # of which would otherwise re-deserialize the same large .pkl; this reuses it.
@@ -353,7 +360,7 @@ def read_all_documents(path: str, embedder_type: str = None, is_ollama_embedder:
 
                 # Check token count
                 token_count = count_tokens(content, embedder_type)
-                if token_count > MAX_EMBEDDING_TOKENS * 10:
+                if token_count > MAX_INDEX_FILE_TOKENS:
                     logger.warning(f"Skipping large file {relative_path}: Token count ({token_count}) exceeds limit")
                     continue
 
@@ -386,7 +393,7 @@ def read_all_documents(path: str, embedder_type: str = None, is_ollama_embedder:
 
                 # Check token count
                 token_count = count_tokens(content, embedder_type)
-                if token_count > MAX_EMBEDDING_TOKENS:
+                if token_count > MAX_INDEX_FILE_TOKENS:
                     logger.warning(f"Skipping large file {relative_path}: Token count ({token_count}) exceeds limit")
                     continue
 
@@ -452,6 +459,59 @@ def prepare_data_pipeline(embedder_type: str = None, is_ollama_embedder: bool = 
     )  # sequential will chain together splitter and embedder
     return data_transformer
 
+def compute_line_span(parent_text: str, order: int, chunk_text: str, step: int):
+    """Absolute (start_line, end_line) of a word-split chunk within its parent.
+
+    adalflow's word splitter windows the parent's space-separated words with a
+    stride of ``step = chunk_size - chunk_overlap``; chunk ``order`` therefore
+    begins at word index ``order * step``. The chunk text is an exact substring
+    of the parent, so the start char (and thus start line) is derivable without
+    fragile substring matching. Returns ``None`` if ``order`` runs past the end.
+    """
+    if not parent_text:
+        return None
+    words = parent_text.split(" ")
+    start_word = order * step
+    if start_word >= len(words):
+        return None
+    start_char = 0 if start_word == 0 else len(" ".join(words[:start_word])) + 1
+    start_line = parent_text[:start_char].count("\n") + 1
+    # rstrip trailing line terminators: the splitter's last chunk keeps the
+    # file's final "\n", which would otherwise push end_line one line past the
+    # last line of actual content.
+    end_line = start_line + chunk_text.rstrip("\n\r").count("\n")
+    return start_line, end_line
+
+
+def attach_chunk_line_spans(chunks, documents, step: int = None):
+    """Write start_line/end_line into each chunk's metadata (fresh dict).
+
+    Only valid for word splitting; a no-op for other split_by modes. ``step``
+    defaults to the configured ``chunk_size - chunk_overlap``. A FRESH meta_data
+    dict is assigned per chunk because adalflow shares one dict across all of a
+    parent's chunks — in-place mutation would make them clobber each other.
+    """
+    cfg = configs["text_splitter"]
+    if cfg.get("split_by") != "word":
+        return chunks
+    if step is None:
+        step = cfg["chunk_size"] - cfg["chunk_overlap"]
+    parent_text_by_id = {str(d.id): d.text for d in documents}
+    for chunk in chunks:
+        if chunk.order is None:
+            continue
+        parent_text = parent_text_by_id.get(chunk.parent_doc_id)
+        if parent_text is None:
+            continue
+        span = compute_line_span(parent_text, chunk.order, chunk.text, step)
+        if span is None:
+            continue
+        start_line, end_line = span
+        chunk.meta_data = {**chunk.meta_data,
+                           "start_line": start_line, "end_line": end_line}
+    return chunks
+
+
 def transform_documents_and_save_to_db(
     documents: List[Document], db_path: str, embedder_type: str = None, is_ollama_embedder: bool = None
 ) -> LocalDB:
@@ -474,6 +534,9 @@ def transform_documents_and_save_to_db(
     db.register_transformer(transformer=data_transformer, key="split_and_embed")
     db.load(documents)
     db.transform(key="split_and_embed")
+    # Tag each chunk with its source line span so retrieved RAG context can be
+    # cited with real line numbers (see format_context_text).
+    attach_chunk_line_spans(db.get_transformed_data(key="split_and_embed"), documents)
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     db.save_state(filepath=db_path)
     return db

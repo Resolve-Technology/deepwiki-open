@@ -13,8 +13,12 @@ from pydantic import BaseModel, Field
 
 from api.config import get_model_config, configs, OPENROUTER_API_KEY, OPENAI_API_KEY, LITELLM_API_KEY, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
 from api.data_pipeline import count_tokens, get_file_content
+from api.prompt_assembly import format_context_text
+from api.prompt_fit import fit_to_budget, prompt_token_budget
 from api.openai_client import OpenAIClient
 from api.vllm_client import VLLMClient
+from api.anthropic_client import AnthropicClient
+from api.vllm_discovery import get_vllm_route
 from api.litellm_client import LiteLLMClient
 from api.openrouter_client import OpenRouterClient
 from api.bedrock_client import BedrockClient
@@ -81,6 +85,7 @@ class ChatCompletionRequest(BaseModel):
     excluded_files: Optional[str] = Field(None, description="Comma-separated list of file patterns to exclude from processing")
     included_dirs: Optional[str] = Field(None, description="Comma-separated list of directories to include exclusively")
     included_files: Optional[str] = Field(None, description="Comma-separated list of file patterns to include exclusively")
+    include_usage: Optional[bool] = Field(False, description="Append a <<<USAGE_JSON:...>>> trailer with token counts after the stream (callers must strip it from the content)")
 
 @app.post("/chat/completions/stream")
 async def chat_completions_stream(request: ChatCompletionRequest):
@@ -212,30 +217,7 @@ async def chat_completions_stream(request: ChatCompletionRequest):
                     retrieved_documents = request_rag(rag_query, language=request.language)
 
                     if retrieved_documents and retrieved_documents[0].documents:
-                        # Format context for the prompt in a more structured way
-                        documents = retrieved_documents[0].documents
-                        logger.info(f"Retrieved {len(documents)} documents")
-
-                        # Group documents by file path
-                        docs_by_file = {}
-                        for doc in documents:
-                            file_path = doc.meta_data.get('file_path', 'unknown')
-                            if file_path not in docs_by_file:
-                                docs_by_file[file_path] = []
-                            docs_by_file[file_path].append(doc)
-
-                        # Format context text with file path grouping
-                        context_parts = []
-                        for file_path, docs in docs_by_file.items():
-                            # Add file header with metadata
-                            header = f"## File Path: {file_path}\n\n"
-                            # Add document content
-                            content = "\n\n".join([doc.text for doc in docs])
-
-                            context_parts.append(f"{header}{content}")
-
-                        # Join all parts with clear separation
-                        context_text = "\n\n" + "-" * 10 + "\n\n".join(context_parts)
+                        context_text = format_context_text(retrieved_documents)
                     else:
                         logger.warning("No documents retrieved from RAG")
                 except Exception as e:
@@ -312,6 +294,17 @@ async def chat_completions_stream(request: ChatCompletionRequest):
         for turn_id, turn in request_rag.memory().items():
             if not isinstance(turn_id, int) and hasattr(turn, 'user_query') and hasattr(turn, 'assistant_response'):
                 conversation_history += f"<turn>\n<user>{turn.user_query.query_str}</user>\n<assistant>{turn.assistant_response.response_str}</assistant>\n</turn>\n"
+
+        # Fit oversized inputs (full program sources) to the provider's context budget
+        file_content, context_text = fit_to_budget(
+            file_content=file_content,
+            context_text=context_text,
+            base_tokens=count_tokens(
+                system_prompt + conversation_history + query,
+                is_ollama_embedder=(request.provider == "ollama"),
+            ),
+            budget=prompt_token_budget(request.provider),
+        )
 
         # Create the prompt with context
         prompt = f"/no_think {system_prompt}\n\n"
@@ -405,10 +398,13 @@ async def chat_completions_stream(request: ChatCompletionRequest):
                 model_type=ModelType.LLM
             )
         elif request.provider == "vllm":
-            logger.info(f"Using vLLM (Openai protocol) with model: {request.model}")
+            # Route to whichever scanned server serves this model; fall back to
+            # the configured VLLM_API_BASE_URL when discovery hasn't seen it.
+            vllm_route = get_vllm_route(request.model)
+            logger.info(f"Using vLLM (Openai protocol) with model: {request.model} via {vllm_route or 'default base URL'}")
 
             # Initialize vLLM client (OpenAI-compatible; api key defaults to "dummy")
-            model = VLLMClient()
+            model = VLLMClient(base_url=vllm_route) if vllm_route else VLLMClient()
             model_kwargs = {
                 "model": request.model,
                 "stream": True,
@@ -417,6 +413,36 @@ async def chat_completions_stream(request: ChatCompletionRequest):
             # Only add top_p if it exists in the model config
             if "top_p" in model_config:
                 model_kwargs["top_p"] = model_config["top_p"]
+            if request.include_usage:
+                model_kwargs["include_usage_marker"] = True
+
+            api_kwargs = model.convert_inputs_to_api_kwargs(
+                input=prompt,
+                model_kwargs=model_kwargs,
+                model_type=ModelType.LLM
+            )
+        elif request.provider == "claude":
+            logger.info(f"Using Claude (native Anthropic SDK) with model: {request.model}")
+
+            # OAuth bearer token from `claude setup-token` (CLAUDE_OAUTH_TOKEN)
+            model = AnthropicClient()
+            model_kwargs = {
+                "model": request.model,
+            }
+            # Only add sampling params / max_tokens / thinking if present in the
+            # model config. NOTE: Opus 4.7+ removed temperature/top_p/top_k (the
+            # API returns 400), so those models must not have them in
+            # generator.json; "thinking": "adaptive" is recommended there instead.
+            if "temperature" in model_config:
+                model_kwargs["temperature"] = model_config["temperature"]
+            if "top_p" in model_config:
+                model_kwargs["top_p"] = model_config["top_p"]
+            if "max_tokens" in model_config:
+                model_kwargs["max_tokens"] = model_config["max_tokens"]
+            if "thinking" in model_config:
+                model_kwargs["thinking"] = model_config["thinking"]
+            if request.include_usage:
+                model_kwargs["include_usage_marker"] = True
 
             api_kwargs = model.convert_inputs_to_api_kwargs(
                 input=prompt,
@@ -534,7 +560,7 @@ async def chat_completions_stream(request: ChatCompletionRequest):
                     except Exception as e_openrouter:
                         logger.error(f"Error with OpenRouter API: {str(e_openrouter)}")
                         yield f"\nError with OpenRouter API: {str(e_openrouter)}\n\nPlease check that you have set the OPENROUTER_API_KEY environment variable with a valid API key."
-                elif request.provider in ("openai", "vllm", "litellm"):
+                elif request.provider in ("openai", "vllm", "litellm", "claude"):
                     try:
                         # Get the response and handle it properly using the previously created api_kwargs
                         logger.info("Making Openai API call")
@@ -666,7 +692,7 @@ async def chat_completions_stream(request: ChatCompletionRequest):
                             except Exception as e_fallback:
                                 logger.error(f"Error with OpenRouter API fallback: {str(e_fallback)}")
                                 yield f"\nError with OpenRouter API fallback: {str(e_fallback)}\n\nPlease check that you have set the OPENROUTER_API_KEY environment variable with a valid API key."
-                        elif request.provider in ("openai", "vllm", "litellm"):
+                        elif request.provider in ("openai", "vllm", "litellm", "claude"):
                             try:
                                 # Create new api_kwargs with the simplified prompt
                                 fallback_api_kwargs = model.convert_inputs_to_api_kwargs(
@@ -681,8 +707,13 @@ async def chat_completions_stream(request: ChatCompletionRequest):
 
                                 # Handle streaming fallback_response from Openai
                                 async for chunk in fallback_response:
-                                    text = chunk if isinstance(chunk, str) else getattr(chunk, 'text', str(chunk))
-                                    yield text
+                                    choices = getattr(chunk, "choices", [])
+                                    if len(choices) > 0:
+                                        delta = getattr(choices[0], "delta", None)
+                                        if delta is not None:
+                                            text = getattr(delta, "content", None)
+                                            if text is not None:
+                                                yield text
                             except Exception as e_fallback:
                                 logger.error(f"Error with Openai API fallback: {str(e_fallback)}")
                                 yield f"\nError with Openai API fallback: {str(e_fallback)}\n\nPlease check that you have set the OPENAI_API_KEY environment variable with a valid API key."
