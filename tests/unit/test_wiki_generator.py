@@ -306,15 +306,21 @@ def test_deep_dive_file_injection(monkeypatch):
         <relevant_files><file_path>prog.cbl</file_path></relevant_files></page>
     </pages></wiki_structure>"""
     monkeypatch.setattr(wiki_generator, "get_file_content",
-                        lambda *a, **k: "COBOL SOURCE LINES")
+                        lambda *a, **k: "IDENTIFICATION DIVISION.\nPROGRAM-ID. PROG.")
     job = make_job(self_review=True)
     dispatch = FakeDispatch([xml, PAGE_BODY, "NO_CHANGES"])
 
     run(run_generation(job, dispatch))
 
     gen_prompt, review_prompt = dispatch.prompts[1], dispatch.prompts[2]
-    for p in (gen_prompt, review_prompt):  # file content carries into review too
-        assert '<currentFileContent path="prog.cbl">\nCOBOL SOURCE LINES\n</currentFileContent>' in p
+    expected_block = (
+        '<currentFileContent path="prog.cbl">\n'
+        "     1 | IDENTIFICATION DIVISION.\n"
+        "     2 | PROGRAM-ID. PROG.\n"
+        "</currentFileContent>"
+    )
+    for p in (gen_prompt, review_prompt):  # numbered content carries into review too
+        assert expected_block in p
     assert "senior mainframe/COBOL systems analyst" in gen_prompt
     # Deep-dive generation retrieval uses the filePath-focused query
     assert ("Contexts related to prog.cbl", "en") in FakeRAG.instances[0].queries

@@ -27,6 +27,7 @@ from api.api import (RepoInfo, WikiCacheRequest, WikiPage, WikiStructureModel,
                      get_wiki_cache_path, save_wiki_cache)
 from api.data_pipeline import count_tokens, get_file_content
 from api.prompt_assembly import (assemble_envelope, format_context_text,
+                                 number_source_lines,
                                  select_generation_system_prompt)
 from api.rag import RAG
 from api.repo_tree import fetch_repo_tree
@@ -358,6 +359,10 @@ async def run_generation(
                 try:
                     file_content = await asyncio.to_thread(
                         get_file_content, repo_url, file_path, repo.type, repo.token)
+                    # Line-number the source so the model cites real line numbers
+                    # instead of guessing; must precede the budget-fit truncation
+                    # inside assemble_envelope so kept lines keep their true numbers.
+                    file_content = number_source_lines(file_content)
                 except Exception as e:
                     logger.error(f"Error retrieving file content: {str(e)}")
                     file_content, file_path = "", ""
