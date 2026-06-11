@@ -36,13 +36,16 @@ def generate_file_url(repo_url: str, repo_type: str, file_path: str,
     if not repo_url:
         return file_path
     try:
+        base = repo_url.rstrip("/")
+        if base.endswith(".git"):
+            base = base[:-len(".git")]
         # Detect by hostname substrings, same as TS
-        if "github" in repo_url:
-            return f"{repo_url}/blob/{default_branch}/{file_path}"
-        elif "gitlab" in repo_url:
-            return f"{repo_url}/-/blob/{default_branch}/{file_path}"
-        elif "bitbucket" in repo_url:
-            return f"{repo_url}/src/{default_branch}/{file_path}"
+        if "github" in base:
+            return f"{base}/blob/{default_branch}/{file_path}"
+        elif "gitlab" in base:
+            return f"{base}/-/blob/{default_branch}/{file_path}"
+        elif "bitbucket" in base:
+            return f"{base}/src/{default_branch}/{file_path}"
     except Exception:
         pass
     return file_path
