@@ -8,12 +8,16 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { tomorrow } from 'react-syntax-highlighter/dist/cjs/styles/prism';
 import Mermaid from './Mermaid';
 import 'katex/dist/katex.min.css';
+import RepoInfo from '@/types/repoinfo';
+import { parseCitation, buildBlobUrl, lineAnchor, extractDefaultBranch } from '@/utils/citationUrl';
 
 interface MarkdownProps {
   content: string;
+  repoInfo?: RepoInfo;
 }
 
-const Markdown: React.FC<MarkdownProps> = ({ content }) => {
+const Markdown: React.FC<MarkdownProps> = ({ content, repoInfo }) => {
+  const defaultBranch = React.useMemo(() => extractDefaultBranch(content), [content]);
   // Define markdown components
   const MarkdownComponents: React.ComponentProps<typeof ReactMarkdown>['components'] = {
     p({ children, ...props }: { children?: React.ReactNode }) {
@@ -61,14 +65,47 @@ const Markdown: React.FC<MarkdownProps> = ({ content }) => {
       return <li className="mb-2 text-sm leading-relaxed dark:text-white" {...props}>{children}</li>;
     },
     a({ children, href, ...props }: { children?: React.ReactNode; href?: string }) {
+      const linkClass = "text-purple-600 dark:text-purple-400 hover:underline font-medium";
+
+      // Real link (e.g. the top-of-page <details> blob links) — leave untouched.
+      if (href) {
+        return (
+          <a href={href} className={linkClass} target="_blank" rel="noopener noreferrer" {...props}>
+            {children}
+          </a>
+        );
+      }
+
+      // Empty href: maybe a "Sources" citation. Get the plain text label.
+      const text =
+        typeof children === 'string'
+          ? children
+          : Array.isArray(children) && children.every((c) => typeof c === 'string')
+            ? (children as string[]).join('')
+            : null;
+
+      const cite = text ? parseCitation(text) : null;
+      if (text && cite && repoInfo) {
+        const url = buildBlobUrl(repoInfo, cite.filePath, defaultBranch);
+        if (url) {
+          const finalHref = url + lineAnchor(repoInfo.type, cite.startLine, cite.endLine);
+          return (
+            <a href={finalHref} className={linkClass} target="_blank" rel="noopener noreferrer" {...props}>
+              {children}
+            </a>
+          );
+        }
+        // Citation, but no buildable URL (local repo / no repoUrl) → plain text, not a dead link.
+        return (
+          <span className="text-gray-500 dark:text-gray-400 font-medium" {...props}>
+            {children}
+          </span>
+        );
+      }
+
+      // Not a citation (or unstringifiable) → preserve previous behavior.
       return (
-        <a
-          href={href}
-          className="text-purple-600 dark:text-purple-400 hover:underline font-medium"
-          target="_blank"
-          rel="noopener noreferrer"
-          {...props}
-        >
+        <a href={href} className={linkClass} target="_blank" rel="noopener noreferrer" {...props}>
           {children}
         </a>
       );
