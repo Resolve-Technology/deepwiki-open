@@ -8,7 +8,7 @@ export interface ParsedCitation {
 
 // "path/to/file.ext" with an optional ":12" or ":12-34" suffix.
 // Requires a file extension so ordinary link labels don't match.
-const CITATION_RE = /^(.+?\.[A-Za-z0-9]+)(?::(\d+)(?:-(\d+))?)?$/;
+const CITATION_RE = /^([^:]+\.[A-Za-z0-9]+)(?::(\d+)(?:-(\d+))?)?$/;
 
 export function parseCitation(text: string): ParsedCitation | null {
   const m = CITATION_RE.exec(text.trim());
@@ -33,7 +33,7 @@ export function buildBlobUrl(repoInfo: RepoInfo, filePath: string, branch: strin
 
 export function lineAnchor(repoType: string, start?: number, end?: number): string {
   if (!start) return '';
-  const range = end && end !== start;
+  const range = !!end && end !== start;
   switch (repoType) {
     case 'github': return range ? `#L${start}-L${end}` : `#L${start}`;
     case 'gitlab': return range ? `#L${start}-${end}` : `#L${start}`;
@@ -42,7 +42,9 @@ export function lineAnchor(repoType: string, start?: number, end?: number): stri
   }
 }
 
-const BRANCH_RE = /\/(?:-\/blob|blob|src)\/([^/#?]+)\//;
+// Require an https?:// URL so prose like "/src/release/" can't match; finds
+// the first real blob URL (the page's <details> block has them near the top).
+const BRANCH_RE = /https?:\/\/\S+?\/(?:-\/blob|blob|src)\/([^/#?]+)\//;
 
 export function extractDefaultBranch(content: string): string {
   const m = BRANCH_RE.exec(content);

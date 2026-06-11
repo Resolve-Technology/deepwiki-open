@@ -51,6 +51,10 @@ describe('buildBlobUrl', () => {
   it('returns null when repoUrl is missing', () => {
     expect(buildBlobUrl({ ...github, repoUrl: null }, 'a.ts', 'main')).toBeNull();
   });
+  it('strips a trailing slash from repoUrl', () => {
+    expect(buildBlobUrl({ ...github, repoUrl: 'https://github.com/o/r/' }, 'a.ts', 'main'))
+      .toBe('https://github.com/o/r/blob/main/a.ts');
+  });
 });
 
 describe('lineAnchor', () => {
@@ -69,6 +73,9 @@ describe('lineAnchor', () => {
   });
   it('bitbucket and unknown types get no line anchor', () => {
     expect(lineAnchor('bitbucket', 51, 54)).toBe('');
+  });
+  it('treats a degenerate :n-n range as a single line', () => {
+    expect(lineAnchor('gitlab', 51, 51)).toBe('#L51');
   });
 });
 
