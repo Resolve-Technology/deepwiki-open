@@ -10,6 +10,28 @@
 
 ---
 
+## Environment note (IMPORTANT — read before running any JS command)
+
+The host has **no Node/npm/yarn** installed; the repo's `node_modules` is **root-owned** (built in
+Docker). All JS commands (install, vitest) run via an ephemeral Node container with the repo
+bind-mounted. Use exactly this wrapper:
+
+```bash
+docker run --rm -u 0:0 -e HOME=/tmp -e COREPACK_HOME=/tmp/.corepack \
+  -v /home/ubuntu/deepwiki-open:/work -w /work node:20-slim \
+  sh -c 'corepack yarn vitest run <optional/path>'
+```
+
+- `corepack` provides yarn 1.22.22 (matches `packageManager`).
+- Run as root (`-u 0:0`) so it can write the root-owned `node_modules`/cache. After any `yarn add`,
+  chown the source lockfiles back: `docker run --rm -u 0:0 -v /home/ubuntu/deepwiki-open:/work -w /work node:20-slim chown 1000:1000 package.json yarn.lock`.
+- Deviations from the original plan, already applied in Task 1: use **`vitest@^2`** (self-contained,
+  no separate `vite` peer) and **drop `@vitejs/plugin-react`** (tests use `React.createElement`, no
+  JSX transform needed; `Markdown.tsx` is never imported by tests). `vitest.config.ts` sets
+  `css.postcss.plugins: []` so vite ignores the project's Tailwind v4 `postcss.config.mjs`.
+
+---
+
 ## File Structure
 
 - **Create** `src/utils/citationUrl.ts` — pure citation-parsing + URL-building functions.
