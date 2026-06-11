@@ -11,6 +11,23 @@ import 'katex/dist/katex.min.css';
 import RepoInfo from '@/types/repoinfo';
 import { parseCitation, buildBlobUrl, lineAnchor, extractDefaultBranch } from '@/utils/citationUrl';
 
+// Flatten a react-markdown link's children to plain text, descending through
+// inline wrapper elements (e.g. a bolded citation). Returns null only for
+// genuinely non-textual content.
+function nodeToPlainText(node: React.ReactNode): string | null {
+  if (typeof node === 'string') return node;
+  if (typeof node === 'number') return String(node);
+  if (node === null || node === undefined || typeof node === 'boolean') return '';
+  if (Array.isArray(node)) {
+    const parts = node.map(nodeToPlainText);
+    return parts.some((p) => p === null) ? null : parts.join('');
+  }
+  if (React.isValidElement(node)) {
+    return nodeToPlainText((node.props as { children?: React.ReactNode }).children);
+  }
+  return null;
+}
+
 interface MarkdownProps {
   content: string;
   repoInfo?: RepoInfo;
@@ -66,38 +83,34 @@ const Markdown: React.FC<MarkdownProps> = ({ content, repoInfo }) => {
     },
     a({ children, href, ...props }: { children?: React.ReactNode; href?: string }) {
       const linkClass = "text-purple-600 dark:text-purple-400 hover:underline font-medium";
+      // react-markdown passes a hast `node` in props; don't spread it onto the DOM.
+      const { node: _node, ...rest } = props as { node?: unknown };
 
       // Real link (e.g. the top-of-page <details> blob links) — leave untouched.
       if (href) {
         return (
-          <a href={href} className={linkClass} target="_blank" rel="noopener noreferrer" {...props}>
+          <a href={href} className={linkClass} target="_blank" rel="noopener noreferrer" {...rest}>
             {children}
           </a>
         );
       }
 
       // Empty href: maybe a "Sources" citation. Get the plain text label.
-      const text =
-        typeof children === 'string'
-          ? children
-          : Array.isArray(children) && children.every((c) => typeof c === 'string')
-            ? (children as string[]).join('')
-            : null;
-
+      const text = nodeToPlainText(children);
       const cite = text ? parseCitation(text) : null;
       if (text && cite && repoInfo) {
         const url = buildBlobUrl(repoInfo, cite.filePath, defaultBranch);
         if (url) {
           const finalHref = url + lineAnchor(repoInfo.type, cite.startLine, cite.endLine);
           return (
-            <a href={finalHref} className={linkClass} target="_blank" rel="noopener noreferrer" {...props}>
+            <a href={finalHref} className={linkClass} target="_blank" rel="noopener noreferrer" {...rest}>
               {children}
             </a>
           );
         }
         // Citation, but no buildable URL (local repo / no repoUrl) → plain text, not a dead link.
         return (
-          <span className="text-gray-500 dark:text-gray-400 font-medium" {...props}>
+          <span className="text-gray-500 dark:text-gray-400 font-medium" {...rest}>
             {children}
           </span>
         );
@@ -105,7 +118,7 @@ const Markdown: React.FC<MarkdownProps> = ({ content, repoInfo }) => {
 
       // Not a citation (or unstringifiable) → preserve previous behavior.
       return (
-        <a href={href} className={linkClass} target="_blank" rel="noopener noreferrer" {...props}>
+        <a href={href} className={linkClass} target="_blank" rel="noopener noreferrer" {...rest}>
           {children}
         </a>
       );
