@@ -1170,6 +1170,7 @@ export default function RepoWikiPage() {
                     <Markdown
                       content={generatedPages[currentPageId].content}
                       repoInfo={effectiveRepoInfo}
+                      citations={generatedPages[currentPageId].citations}
                     />
                   </div>
 
