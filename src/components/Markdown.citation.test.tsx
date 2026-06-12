@@ -57,6 +57,7 @@ describe('Markdown citation grounding', () => {
     const html = render('Sources: [CAL101.txt:51-54]()', gitlab, citations);
     expect(html).toContain('MOVE A TO B');          // real source text inlined
     expect(html).not.toContain('/-/blob/');         // no gitlab link
+    expect(html).toContain('✓');                    // rendered as a verified badge
   });
 
   it('verified whole-file citation shows a badge, no link', () => {
@@ -64,7 +65,8 @@ describe('Markdown citation grounding', () => {
       'CAL101.txt': { status: 'verified', filePath: 'CAL101.txt' },
     };
     const html = render('Sources: [CAL101.txt]()', gitlab, citations);
-    expect(html).toContain('CAL101.txt');
+    expect(html).toContain('✓');                    // verified badge, not a link
+    expect(html).not.toMatch(/<a[^>]*>/);           // no anchor element at all
     expect(html).not.toContain('/-/blob/');
   });
 

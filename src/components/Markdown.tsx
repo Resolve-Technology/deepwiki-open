@@ -22,7 +22,7 @@ const CitationSnippet: React.FC<{ label: string; snippet?: string }> = ({ label,
   }
   return (
     <span className="citation-verified">
-      <button type="button" onClick={() => setOpen((o) => !o)} className={badge}>
+      <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open} className={badge}>
         ✓ {label}
       </button>
       <span
