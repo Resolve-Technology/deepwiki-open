@@ -29,6 +29,7 @@ from api.data_pipeline import count_tokens, get_file_content
 from api.prompt_assembly import (assemble_envelope, format_context_text,
                                  number_source_lines,
                                  select_generation_system_prompt)
+from api.citation_grounding import build_source_map, verify_page_citations
 from api.rag import RAG
 from api.repo_tree import fetch_repo_tree
 from api.wiki_prompts import (build_page_prompt, build_page_rag_query,
@@ -205,29 +206,33 @@ async def run_generation(
         return result.text
 
     async def retrieve_for_generation(inner_prompt: str,
-                                      file_path: str = "") -> str:
+                                      file_path: str = "") -> tuple:
         """The websocket's retrieval gate, replicated for generation calls.
 
-        The websocket retrieves whenever the message is <= 8000 tokens (so
-        standard page prompts DID get RAG context in the browser flow — only
-        oversized messages like big structure prompts went without). The
-        retrieval query mirrors its fallback chain: a filePath-focused query
-        when filePath is set (deep-dive pages), else the message itself.
+        Returns (context_text, documents): the formatted context string AND the
+        raw retrieved documents (used to build the citation source map). The
+        websocket retrieves whenever the message is <= 8000 tokens (so standard
+        page prompts DID get RAG context in the browser flow — only oversized
+        messages like big structure prompts went without). The retrieval query
+        mirrors its fallback chain: a filePath-focused query when filePath is set
+        (deep-dive pages), else the message itself.
         """
         tokens = count_tokens(inner_prompt,
                               is_ollama_embedder=(job.provider == "ollama"))
         logger.info(f"Request size: {tokens} tokens")
         if tokens > 8000:
             logger.warning(f"Request exceeds recommended token limit ({tokens} > 7500)")
-            return ""
+            return "", []
         rag_query = f"Contexts related to {file_path}" if file_path else inner_prompt
         try:
             retrieved = await asyncio.to_thread(rag, rag_query, language=job.language)
-            return format_context_text(retrieved)
+            documents = (retrieved[0].documents
+                         if retrieved and retrieved[0].documents else [])
+            return format_context_text(retrieved), documents
         except Exception as e:
             # Continue without RAG if there's an error (websocket behavior)
             logger.error(f"Error in RAG retrieval: {str(e)}")
-            return ""
+            return "", []
 
     async def save_partial(generated: Dict[str, Dict[str, Any]],
                            structure: Dict[str, Any]) -> None:
@@ -292,7 +297,7 @@ async def run_generation(
         file_tree, readme, repo.owner, repo.repo, job.language, job.comprehensive)
     # Big structure prompts (full file tree) exceed the 8000-token gate and go
     # without retrieval; small repos fall under it and retrieve, like today.
-    structure_context = await retrieve_for_generation(structure_inner)
+    structure_context, _ = await retrieve_for_generation(structure_inner)
     structure_prompt = assemble_envelope(system_prompt, structure_inner,
                                          context_text=structure_context,
                                          provider=job.provider)
@@ -345,6 +350,7 @@ async def run_generation(
 
         is_deep_dive = page["id"].startswith("page-analysis-")
         file_content, file_path = "", ""
+        page_documents = []
         try:
             page_inner = build_page_prompt(
                 page["title"], page["filePaths"], job.language, is_deep_dive,
@@ -378,7 +384,7 @@ async def run_generation(
             # Page prompts are usually under the 8000-token gate, so the
             # browser flow retrieved for them (filePath-focused query on
             # deep-dives, the message itself otherwise) — reproduce that.
-            page_context = await retrieve_for_generation(
+            page_context, page_documents = await retrieve_for_generation(
                 page_inner, file_path=requested_file_path)
             prompt = assemble_envelope(system_prompt, page_inner,
                                        file_content=file_content, file_path=file_path,
@@ -427,7 +433,14 @@ async def run_generation(
                 logger.warning(f"Self-review failed for {page['title']}, keeping original: {e}")
 
         # 7. Incremental save after every page
-        generated[page["id"]] = {**page, "content": content}
+        # Verify citations against the exact source we showed the model, so the
+        # UI can show real source text for grounded claims and flag the rest.
+        if content.startswith("Error generating content:"):
+            citations = {}
+        else:
+            source_map = build_source_map(file_content, file_path, page_documents)
+            citations = verify_page_citations(content, source_map)
+        generated[page["id"]] = {**page, "content": content, "citations": citations}
         progress.pages_done += 1
         progress.current_page_title = ""
         notify()

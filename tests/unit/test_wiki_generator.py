@@ -513,3 +513,23 @@ def test_force_regenerate_deletes_target_cache(tmp_path):
         run(run_generation(job, dispatch))
     import os
     assert not os.path.exists(path)
+
+
+# --- citation verification -----------------------------------------------------
+
+
+def test_page_citations_verified_and_broken(tmp_path):
+    # FakeRAG provides file a.py (whole-file, no line span). A whole-file cite to
+    # a.py verifies; a cite to a file never provided is broken.
+    body = ("# P\n\nClaim one. Sources: [a.py]()\n\n"
+            "Claim two. Sources: [ghost.py:1-2]()")
+    job = make_job(self_review=False)
+    dispatch = FakeDispatch([STRUCTURE_XML, body, body, body])
+
+    run(run_generation(job, dispatch))
+
+    pages = read_cache(tmp_path, job)["generated_pages"]
+    cites = next(iter(pages.values()))["citations"]
+    assert cites["a.py"]["status"] == "verified"
+    assert cites["ghost.py:1-2"]["status"] == "broken"
+    assert cites["ghost.py:1-2"]["reason"] == "file not provided"
