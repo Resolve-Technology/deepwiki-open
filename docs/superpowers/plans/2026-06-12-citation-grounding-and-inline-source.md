@@ -859,6 +859,196 @@ git commit -m "chore: bump APP_VERSION to 0.3.8 (citation grounding + inline sou
 
 ---
 
+## Task 9: Ground citations against the post-truncation source (`fit_envelope_inputs`)
+
+**Why (added after final review):** the source map was built from the FULL deep-dive `file_content`, but `assemble_envelope` calls `fit_to_budget` (`api/prompt_fit.py`) which, for oversized files, drops RAG context and truncates the *middle* of the file. A citation to a dropped middle line was therefore marked **verified** even though the model never saw that line — exactly the false confidence this feature prevents. Reachable on the vLLM deployment (24k-token budget) with large COBOL sources.
+
+**Fix:** extract a shared `fit_envelope_inputs` helper so `assemble_envelope`'s assembled bytes stay identical (byte-parity preserved), and let the generator learn the fitted `(file_content, context_text)`. Because the deep-dive source is line-numbered, `build_source_map` over the truncated text naturally keeps only the surviving complete lines (the partial head/tail line and the `*** TRUNCATED ***` marker don't match the `N | ` prefix and are skipped).
+
+**Files:**
+- Modify: `api/prompt_assembly.py` (add `fit_envelope_inputs`; `assemble_envelope` calls it)
+- Test: `tests/unit/test_prompt_assembly.py`
+
+- [ ] **Step 1: Write the failing tests**
+
+Add to `tests/unit/test_prompt_assembly.py` (extend the import to include `fit_envelope_inputs`):
+
+```python
+def test_fit_envelope_inputs_returns_inputs_when_within_budget():
+    fc, ctx = fit_envelope_inputs("sys", "q", file_content="abc",
+                                  context_text="def", provider="claude")
+    assert (fc, ctx) == ("abc", "def")
+
+
+def test_fit_envelope_inputs_drops_rag_and_truncates_when_over_budget(monkeypatch):
+    import api.prompt_assembly as pa
+    monkeypatch.setattr(pa, "prompt_token_budget", lambda provider: 1)
+    fc, ctx = fit_envelope_inputs("sys", "q", file_content="x" * 40,
+                                  context_text="y" * 40, provider="vllm")
+    # Over budget with a file present: RAG context is dropped first, then the
+    # file is reduced (budget exhausted -> omitted placeholder).
+    assert ctx == ""
+    assert fc.startswith("[file omitted")
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `cd /home/ubuntu/deepwiki-open && .venv/bin/python -m pytest tests/unit/test_prompt_assembly.py -k fit_envelope_inputs -v`
+Expected: FAIL — `ImportError: cannot import name 'fit_envelope_inputs'`.
+
+- [ ] **Step 3: Add the helper and route `assemble_envelope` through it**
+
+In `api/prompt_assembly.py`, add above `assemble_envelope`:
+
+```python
+def fit_envelope_inputs(system_prompt: str, query: str, *,
+                        conversation_history: str = "",
+                        file_content: str = "",
+                        context_text: str = "",
+                        provider: str = ""):
+    """Apply the provider budget fit to ``(file_content, context_text)`` exactly
+    as :func:`assemble_envelope` does, and return the fitted pair.
+
+    Exposed so callers can learn what the model will ACTUALLY see after
+    truncation — e.g. to ground citations against the post-fit source rather than
+    the full file (a citation to a dropped line must resolve as broken).
+    """
+    return fit_to_budget(
+        file_content=file_content,
+        context_text=context_text,
+        base_tokens=count_tokens(
+            system_prompt + conversation_history + query,
+            is_ollama_embedder=(provider == "ollama"),
+        ),
+        budget=prompt_token_budget(provider),
+    )
+```
+
+Then replace the fit block at the top of `assemble_envelope` (the `file_content, context_text = fit_to_budget(...)` call) with:
+
+```python
+    # Fit oversized inputs (full program sources) to the provider's context budget
+    file_content, context_text = fit_envelope_inputs(
+        system_prompt, query,
+        conversation_history=conversation_history,
+        file_content=file_content,
+        context_text=context_text,
+        provider=provider,
+    )
+```
+
+- [ ] **Step 4: Run tests**
+
+Run: `cd /home/ubuntu/deepwiki-open && .venv/bin/python -m pytest tests/unit/test_prompt_assembly.py -v`
+Expected: PASS — the 2 new tests AND all existing byte-parity tests (assembled output is unchanged because the helper performs the identical computation).
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd /home/ubuntu/deepwiki-open
+git add api/prompt_assembly.py tests/unit/test_prompt_assembly.py
+git commit -m "feat: fit_envelope_inputs helper exposing post-budget-fit inputs"
+```
+
+---
+
+## Task 10: Build the source map from the fitted inputs
+
+**Files:**
+- Modify: `api/wiki_generator.py` (import; store-point source-map build)
+- Test: `tests/unit/test_wiki_generator.py`
+
+- [ ] **Step 1: Write the failing test**
+
+Add to `tests/unit/test_wiki_generator.py`. It monkeypatches `fit_envelope_inputs` at the generator seam to simulate a budget that keeps only lines 1-2 and 6 of a 6-line file and drops RAG, so a citation to the dropped middle (lines 3-4) must be broken while head (1-2) and tail (6) verify:
+
+```python
+def test_deep_dive_citations_grounded_on_truncated_source(tmp_path, monkeypatch):
+    xml = """<wiki_structure><title>T</title><description>D</description><pages>
+      <page id="page-analysis-prog"><title>Prog</title>
+        <relevant_files><file_path>prog.cbl</file_path></relevant_files></page>
+    </pages></wiki_structure>"""
+    monkeypatch.setattr(wiki_generator, "get_file_content",
+                        lambda *a, **k: "AAA\nBBB\nCCC\nDDD\nEEE\nFFF")
+
+    # Simulate the budget keeping numbered lines 1-2 (head) and 6 (tail), the
+    # middle dropped, and RAG context dropped entirely.
+    def fake_fit(system_prompt, query, *, conversation_history="",
+                 file_content="", context_text="", provider=""):
+        kept = ("     1 | AAA\n     2 | BBB\n"
+                "*** [TRUNCATED] ***\n     6 | FFF")
+        return kept, ""
+    monkeypatch.setattr(wiki_generator, "fit_envelope_inputs", fake_fit)
+
+    body = ("# P\n\nHead. Sources: [prog.cbl:1-2]()\n\n"
+            "Middle. Sources: [prog.cbl:3-4]()\n\n"
+            "Tail. Sources: [prog.cbl:6]()")
+    job = make_job(self_review=False)
+    dispatch = FakeDispatch([xml, body])
+
+    run(run_generation(job, dispatch))
+
+    cites = read_cache(tmp_path, job)["generated_pages"]["page-analysis-prog"]["citations"]
+    assert cites["prog.cbl:1-2"]["status"] == "verified"
+    assert cites["prog.cbl:3-4"]["status"] == "broken"   # dropped middle line
+    assert cites["prog.cbl:6"]["status"] == "verified"
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cd /home/ubuntu/deepwiki-open && .venv/bin/python -m pytest tests/unit/test_wiki_generator.py::test_deep_dive_citations_grounded_on_truncated_source -v`
+Expected: FAIL — with the old code (map built from the full `file_content`) `prog.cbl:3-4` resolves `verified`, so the assertion fails. (It also fails first on `AttributeError`/missing `fit_envelope_inputs` import until Step 3.)
+
+- [ ] **Step 3: Implement**
+
+In `api/wiki_generator.py`, add `fit_envelope_inputs` to the `from api.prompt_assembly import (...)` block.
+
+Then at the store point, replace:
+
+```python
+        if content.startswith(_ERROR_CONTENT_PREFIX):
+            citations = {}
+        else:
+            source_map = build_source_map(file_content, file_path, page_documents)
+            citations = verify_page_citations(content, source_map)
+```
+
+with:
+
+```python
+        if content.startswith(_ERROR_CONTENT_PREFIX):
+            citations = {}
+        else:
+            # Ground citations against what the model ACTUALLY saw: the budget fit
+            # may truncate the deep-dive file's middle or drop RAG context, so
+            # rebuild from the fitted inputs (a citation to a dropped line must
+            # resolve broken, not falsely verified).
+            fitted_fc, fitted_ctx = fit_envelope_inputs(
+                system_prompt, page_inner,
+                file_content=file_content, context_text=page_context,
+                provider=job.provider)
+            rag_for_map = page_documents if fitted_ctx and fitted_ctx == page_context else []
+            source_map = build_source_map(fitted_fc, file_path, rag_for_map)
+            citations = verify_page_citations(content, source_map)
+```
+
+(`system_prompt`, `page_inner`, and `page_context` are all bound whenever `content` is not an error string: `page_inner` and `page_context` are assigned earlier in the per-page `try` before `content` is produced, and `system_prompt` is a loop-invariant defined before the loop.)
+
+- [ ] **Step 4: Run tests**
+
+Run: `cd /home/ubuntu/deepwiki-open && .venv/bin/python -m pytest tests/unit/test_wiki_generator.py -v`
+Expected: PASS — the new truncation test plus all existing generator tests. In particular `test_page_citations_verified_and_broken` still passes: its FakeRAG context is small and within budget, so `fitted_ctx == page_context` and the RAG file `a.py` is still included (verified).
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd /home/ubuntu/deepwiki-open
+git add api/wiki_generator.py tests/unit/test_wiki_generator.py
+git commit -m "fix: ground citations against post-truncation source the model saw"
+```
+
+---
+
 ## Out of scope / deploy notes
 
 - **No flagging of uncited prose** — only citations are verified (spec decision). A fabricated paragraph with no citation is not flagged.
