@@ -30,6 +30,14 @@ interface WikiPage {
   filePaths: string[];
   importance: 'high' | 'medium' | 'low';
   relatedPages: string[];
+  citations?: Record<string, {
+    status: 'verified' | 'broken';
+    filePath: string;
+    startLine?: number;
+    endLine?: number;
+    snippet?: string;
+    reason?: string;
+  }>;
   parentId?: string;
   isSection?: boolean;
   children?: string[];
