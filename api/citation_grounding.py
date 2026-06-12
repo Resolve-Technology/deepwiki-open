@@ -9,7 +9,7 @@ possibly fabricated. Pure module: no I/O, no network.
 """
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 # Mirror of src/utils/citationUrl.ts CITATION_RE: a path with a file extension,
 # optional :line or :start-end. Requires the extension so prose can't match.
