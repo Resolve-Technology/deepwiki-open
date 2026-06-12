@@ -108,7 +108,7 @@ def resolve_citation(label: str, source_map: Dict[str, FileSource]) -> Optional[
         return info
 
     needed = list(range(start, (end or start) + 1))
-    if not all(n in fs.lines for n in needed):
+    if not needed or not all(n in fs.lines for n in needed):
         info["reason"] = "lines not in provided source"
         return info
 

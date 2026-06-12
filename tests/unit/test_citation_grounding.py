@@ -134,3 +134,12 @@ def test_verify_page_citations_round_trip_with_numbered_source():
     smap = build_source_map(numbered, "x.cbl", [])
     out = verify_page_citations("Sources: [x.cbl:1-2]()", smap)
     assert out["x.cbl:1-2"]["snippet"] == "FIRST LINE\nSECOND LINE"
+
+
+def test_resolve_inverted_range_is_broken():
+    # end < start -> empty range; must be broken, not a spuriously-verified
+    # empty snippet.
+    info = resolve_citation("prog.cbl:13-12", _smap())
+    assert info["status"] == "broken"
+    assert info["reason"] == "lines not in provided source"
+    assert info["snippet"] is None
