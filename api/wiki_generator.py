@@ -26,8 +26,8 @@ from urllib.parse import unquote
 from api.api import (RepoInfo, WikiCacheRequest, WikiPage, WikiStructureModel,
                      get_wiki_cache_path, save_wiki_cache)
 from api.data_pipeline import count_tokens, get_file_content
-from api.prompt_assembly import (assemble_envelope, format_context_text,
-                                 number_source_lines,
+from api.prompt_assembly import (assemble_envelope, fit_envelope_inputs,
+                                 format_context_text, number_source_lines,
                                  select_generation_system_prompt)
 from api.citation_grounding import build_source_map, verify_page_citations
 from api.rag import RAG
@@ -442,7 +442,16 @@ async def run_generation(
         if content.startswith(_ERROR_CONTENT_PREFIX):
             citations = {}
         else:
-            source_map = build_source_map(file_content, file_path, page_documents)
+            # Ground citations against what the model ACTUALLY saw: the budget fit
+            # may truncate the deep-dive file's middle or drop RAG context, so
+            # rebuild from the fitted inputs (a citation to a dropped line must
+            # resolve broken, not falsely verified).
+            fitted_fc, fitted_ctx = fit_envelope_inputs(
+                system_prompt, page_inner,
+                file_content=file_content, context_text=page_context,
+                provider=job.provider)
+            rag_for_map = page_documents if fitted_ctx and fitted_ctx == page_context else []
+            source_map = build_source_map(fitted_fc, file_path, rag_for_map)
             citations = verify_page_citations(content, source_map)
         generated[page["id"]] = {**page, "content": content, "citations": citations}
         progress.pages_done += 1

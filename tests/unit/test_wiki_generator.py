@@ -533,3 +533,34 @@ def test_page_citations_verified_and_broken(tmp_path):
     assert cites["a.py"]["status"] == "verified"
     assert cites["ghost.py:1-2"]["status"] == "broken"
     assert cites["ghost.py:1-2"]["reason"] == "file not provided"
+
+
+def test_deep_dive_citations_grounded_on_truncated_source(tmp_path, monkeypatch):
+    xml = """<wiki_structure><title>T</title><description>D</description><pages>
+      <page id="page-analysis-prog"><title>Prog</title>
+        <relevant_files><file_path>prog.cbl</file_path></relevant_files></page>
+    </pages></wiki_structure>"""
+    monkeypatch.setattr(wiki_generator, "get_file_content",
+                        lambda *a, **k: "AAA\nBBB\nCCC\nDDD\nEEE\nFFF")
+
+    # Simulate the budget keeping numbered lines 1-2 (head) and 6 (tail), the
+    # middle dropped, and RAG context dropped entirely.
+    def fake_fit(system_prompt, query, *, conversation_history="",
+                 file_content="", context_text="", provider=""):
+        kept = ("     1 | AAA\n     2 | BBB\n"
+                "*** [TRUNCATED] ***\n     6 | FFF")
+        return kept, ""
+    monkeypatch.setattr(wiki_generator, "fit_envelope_inputs", fake_fit)
+
+    body = ("# P\n\nHead. Sources: [prog.cbl:1-2]()\n\n"
+            "Middle. Sources: [prog.cbl:3-4]()\n\n"
+            "Tail. Sources: [prog.cbl:6]()")
+    job = make_job(self_review=False)
+    dispatch = FakeDispatch([xml, body])
+
+    run(run_generation(job, dispatch))
+
+    cites = read_cache(tmp_path, job)["generated_pages"]["page-analysis-prog"]["citations"]
+    assert cites["prog.cbl:1-2"]["status"] == "verified"
+    assert cites["prog.cbl:3-4"]["status"] == "broken"   # dropped middle line
+    assert cites["prog.cbl:6"]["status"] == "verified"
