@@ -6,7 +6,8 @@ these tests quote the websocket's format exactly (leading ``/no_think ``, the
 """
 import pytest
 
-from api.prompt_assembly import (assemble_envelope, format_context_text,
+from api.prompt_assembly import (assemble_envelope, fit_envelope_inputs,
+                                 format_context_text,
                                  number_source_lines,
                                  select_generation_system_prompt)
 
@@ -185,3 +186,20 @@ def test_format_context_text_partial_spans_falls_back_to_plain():
     out = format_context_text([FakeRetrieverOutput(docs)])
     assert "(lines" not in out
     assert "## File Path: a.py\n\nchunk A\n\nchunk B" in out
+
+
+def test_fit_envelope_inputs_returns_inputs_when_within_budget():
+    fc, ctx = fit_envelope_inputs("sys", "q", file_content="abc",
+                                  context_text="def", provider="claude")
+    assert (fc, ctx) == ("abc", "def")
+
+
+def test_fit_envelope_inputs_drops_rag_and_truncates_when_over_budget(monkeypatch):
+    import api.prompt_assembly as pa
+    monkeypatch.setattr(pa, "prompt_token_budget", lambda provider: 1)
+    fc, ctx = fit_envelope_inputs("sys", "q", file_content="x" * 40,
+                                  context_text="y" * 40, provider="vllm")
+    # Over budget with a file present: RAG context is dropped first, then the
+    # file is reduced (budget exhausted -> omitted placeholder).
+    assert ctx == ""
+    assert fc.startswith("[file omitted")

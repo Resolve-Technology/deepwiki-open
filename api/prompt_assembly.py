@@ -126,6 +126,29 @@ def number_source_lines(content: str, start: int = 1) -> str:
     )
 
 
+def fit_envelope_inputs(system_prompt: str, query: str, *,
+                        conversation_history: str = "",
+                        file_content: str = "",
+                        context_text: str = "",
+                        provider: str = ""):
+    """Apply the provider budget fit to ``(file_content, context_text)`` exactly
+    as :func:`assemble_envelope` does, and return the fitted pair.
+
+    Exposed so callers can learn what the model will ACTUALLY see after
+    truncation — e.g. to ground citations against the post-fit source rather than
+    the full file (a citation to a dropped line must resolve as broken).
+    """
+    return fit_to_budget(
+        file_content=file_content,
+        context_text=context_text,
+        base_tokens=count_tokens(
+            system_prompt + conversation_history + query,
+            is_ollama_embedder=(provider == "ollama"),
+        ),
+        budget=prompt_token_budget(provider),
+    )
+
+
 def assemble_envelope(system_prompt: str, query: str, *,
                       conversation_history: str = "",
                       file_content: str = "",
@@ -138,14 +161,12 @@ def assemble_envelope(system_prompt: str, query: str, *,
     the websocket passes ``request.provider`` to ``prompt_token_budget``.
     """
     # Fit oversized inputs (full program sources) to the provider's context budget
-    file_content, context_text = fit_to_budget(
+    file_content, context_text = fit_envelope_inputs(
+        system_prompt, query,
+        conversation_history=conversation_history,
         file_content=file_content,
         context_text=context_text,
-        base_tokens=count_tokens(
-            system_prompt + conversation_history + query,
-            is_ollama_embedder=(provider == "ollama"),
-        ),
-        budget=prompt_token_budget(provider),
+        provider=provider,
     )
 
     # Create the prompt with context
