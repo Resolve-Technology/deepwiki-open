@@ -13,6 +13,7 @@ from adalflow.core.db import LocalDB
 from api.config import configs, DEFAULT_EXCLUDED_DIRS, DEFAULT_EXCLUDED_FILES
 from api.ollama_patch import OllamaDocumentProcessor
 from urllib.parse import urlparse, urlunparse, quote
+from typing import Dict
 import requests
 from requests.exceptions import RequestException
 
@@ -187,6 +188,26 @@ def read_file_content(file_path: str) -> str:
         logger.warning(f"{file_path} is not valid UTF-8; reading with latin-1 fallback")
         with open(file_path, "r", encoding="latin-1") as f:
             return f.read()
+
+def read_repo_files(repo_dir: str, file_paths) -> Dict[str, str]:
+    """Read the full text of ``file_paths`` (relative to ``repo_dir``).
+
+    Returns ``{relative_path: content}`` for the files that exist, skipping
+    missing/unreadable ones. Used to ground citations against the full repo
+    file when the cited lines were not among the chunks the model saw.
+    """
+    out: Dict[str, str] = {}
+    if not repo_dir:
+        return out
+    for rel in file_paths or []:
+        if not rel:
+            continue
+        try:
+            out[rel] = read_file_content(os.path.join(repo_dir, rel))
+        except (OSError, ValueError):
+            continue
+    return out
+
 
 def read_all_documents(path: str, embedder_type: str = None, is_ollama_embedder: bool = None,
                       excluded_dirs: List[str] = None, excluded_files: List[str] = None,

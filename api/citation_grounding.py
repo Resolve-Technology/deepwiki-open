@@ -7,6 +7,7 @@ exist in what we provided, and do the cited lines fall within it? Verified
 citations become inline source text in the UI; broken ones are flagged as
 possibly fabricated. Pure module: no I/O, no network.
 """
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
@@ -79,14 +80,52 @@ def build_source_map(file_content: str, file_path: str, rag_documents) -> Dict[s
     return smap
 
 
+def build_repo_source_map(repo_files: Dict[str, str]) -> Dict[str, FileSource]:
+    """Map file_path -> FileSource of the FULL repo file content.
+
+    Used as a fallback when verifying citations: a citation to a real file and a
+    real line range should ground even if those exact lines were not among the
+    retrieved chunks the model saw. ``repo_files`` is ``{relative_path: text}``.
+    """
+    smap: Dict[str, FileSource] = {}
+    for path, content in (repo_files or {}).items():
+        if not path:
+            continue
+        fs = FileSource()
+        for n, line in enumerate((content or "").splitlines(), start=1):
+            fs.lines[n] = line
+        smap[path] = fs
+    return smap
+
+
+def _lookup(source_map: Dict[str, FileSource], file_path: str) -> Optional[FileSource]:
+    """Find ``file_path`` in a source map, falling back to a UNIQUE basename
+    match so a citation that dropped the directory prefix (``CLNTSKM.txt`` for
+    ``copybook/CLNTSKM.txt``) still resolves. Ambiguous basenames don't match."""
+    fs = source_map.get(file_path)
+    if fs is not None:
+        return fs
+    base = os.path.basename(file_path)
+    matches = [v for k, v in source_map.items() if os.path.basename(k) == base]
+    return matches[0] if len(matches) == 1 else None
+
+
 # Markdown citations are empty-href links: [label](). Real links have an href
 # and are skipped. Mirrors Markdown.tsx, which only treats empty-href links as
 # citation candidates.
 _EMPTY_LINK_RE = re.compile(r"\[([^\]]+)\]\(\)")
 
 
-def resolve_citation(label: str, source_map: Dict[str, FileSource]) -> Optional[dict]:
+def resolve_citation(label: str, source_map: Dict[str, FileSource],
+                     repo_map: Optional[Dict[str, FileSource]] = None) -> Optional[dict]:
     """Resolve one citation label against the provided source.
+
+    Tries ``source_map`` first — the exact source the model was shown, so a hit
+    there is the strongest grounding and its snippet is what the model read —
+    then falls back to ``repo_map``, the full repo files, so a citation to a
+    real file and real line range still verifies when those lines simply were
+    not among the retrieved chunks. Only genuine fabrications (no such file, or
+    lines past the end of the real file) remain broken.
 
     Returns a dict {status, filePath, startLine, endLine, snippet, reason}, or
     None if ``label`` is not a citation at all.
@@ -98,26 +137,33 @@ def resolve_citation(label: str, source_map: Dict[str, FileSource]) -> Optional[
     info = {"status": "broken", "filePath": file_path, "startLine": start,
             "endLine": end, "snippet": None, "reason": None}
 
-    fs = source_map.get(file_path)
-    if fs is None:
-        info["reason"] = "file not provided"
-        return info
-
-    if start is None:  # whole-file citation: presence is enough
-        info["status"] = "verified"
-        return info
-
-    needed = list(range(start, (end or start) + 1))
-    if not needed or not all(n in fs.lines for n in needed):
+    for smap in (source_map, repo_map):
+        if not smap:
+            continue
+        fs = _lookup(smap, file_path)
+        if fs is None:
+            continue
+        if start is None:  # whole-file citation: presence is enough
+            info["status"] = "verified"
+            info["reason"] = None
+            return info
+        needed = list(range(start, (end or start) + 1))
+        if needed and all(n in fs.lines for n in needed):
+            info["status"] = "verified"
+            info["snippet"] = "\n".join(fs.lines[n] for n in needed)
+            info["reason"] = None
+            return info
+        # File is present here but these lines are not — record why and let the
+        # next map (the full file) get a chance before giving up.
         info["reason"] = "lines not in provided source"
-        return info
 
-    info["status"] = "verified"
-    info["snippet"] = "\n".join(fs.lines[n] for n in needed)
+    if info["reason"] is None:
+        info["reason"] = "file not provided"
     return info
 
 
-def verify_page_citations(content: str, source_map: Dict[str, FileSource]) -> Dict[str, dict]:
+def verify_page_citations(content: str, source_map: Dict[str, FileSource],
+                          repo_map: Optional[Dict[str, FileSource]] = None) -> Dict[str, dict]:
     """Resolve every `[label]()` citation in the page markdown.
 
     Returns {label: resolved-info}. Non-citation empty links are skipped;
@@ -128,7 +174,7 @@ def verify_page_citations(content: str, source_map: Dict[str, FileSource]) -> Di
         label = label.strip()
         if label in out:
             continue
-        info = resolve_citation(label, source_map)
+        info = resolve_citation(label, source_map, repo_map)
         if info is not None:
             out[label] = info
     return out

@@ -1,9 +1,9 @@
 """Tests for citation grounding (verify citations against provided source)."""
 from types import SimpleNamespace
 
-from api.citation_grounding import (FileSource, build_source_map,
-                                    parse_citation_label, resolve_citation,
-                                    verify_page_citations)
+from api.citation_grounding import (FileSource, build_repo_source_map,
+                                    build_source_map, parse_citation_label,
+                                    resolve_citation, verify_page_citations)
 from api.prompt_assembly import number_source_lines
 
 
@@ -143,3 +143,80 @@ def test_resolve_inverted_range_is_broken():
     assert info["status"] == "broken"
     assert info["reason"] == "lines not in provided source"
     assert info["snippet"] is None
+
+
+# --- Full-repo-file fallback grounding -------------------------------------
+# A citation to a real file + real line range should verify even when those
+# exact lines were not among the retrieved chunks the model saw. Only genuine
+# fabrications (no such file / lines past end-of-file / wrong path) stay broken.
+
+
+def _repo_files():
+    return {
+        "copybook/CLNTSKM.txt": "AAA\nBBB\nCCC\nDDD\nEEE",  # 5 lines
+        "CAL101.txt": "P1\nP2\nP3",                          # 3 lines
+    }
+
+
+def test_build_repo_source_map_numbers_lines_from_one():
+    rmap = build_repo_source_map({"f.txt": "L1\nL2\nL3"})
+    assert rmap["f.txt"].lines == {1: "L1", 2: "L2", 3: "L3"}
+
+
+def test_resolve_verified_against_repo_file_when_not_in_seen_map():
+    repo_map = build_repo_source_map(_repo_files())
+    info = resolve_citation("copybook/CLNTSKM.txt:2-3", {}, repo_map)
+    assert info["status"] == "verified"
+    assert info["snippet"] == "BBB\nCCC"
+
+
+def test_resolve_whole_file_verified_against_repo_map():
+    repo_map = build_repo_source_map(_repo_files())
+    info = resolve_citation("CAL101.txt", {}, repo_map)
+    assert info["status"] == "verified"
+    assert info["snippet"] is None
+
+
+def test_resolve_broken_when_lines_past_end_of_real_file():
+    repo_map = build_repo_source_map(_repo_files())
+    info = resolve_citation("CAL101.txt:1-50", {}, repo_map)
+    assert info["status"] == "broken"
+    assert info["reason"] == "lines not in provided source"
+
+
+def test_resolve_broken_when_file_not_in_repo():
+    repo_map = build_repo_source_map(_repo_files())
+    info = resolve_citation("ghost.cbl:1-2", {}, repo_map)
+    assert info["status"] == "broken"
+    assert info["reason"] == "file not provided"
+
+
+def test_basename_fallback_resolves_dropped_directory_prefix():
+    # Model cites bare 'CLNTSKM.txt'; real file is 'copybook/CLNTSKM.txt'.
+    repo_map = build_repo_source_map(_repo_files())
+    info = resolve_citation("CLNTSKM.txt:1-2", {}, repo_map)
+    assert info["status"] == "verified"
+    assert info["snippet"] == "AAA\nBBB"
+
+
+def test_basename_fallback_skips_ambiguous_match():
+    repo_map = build_repo_source_map({"a/dup.txt": "X1\nX2", "b/dup.txt": "Y1\nY2"})
+    info = resolve_citation("dup.txt:1", {}, repo_map)
+    assert info["status"] == "broken"
+
+
+def test_seen_map_snippet_takes_precedence_over_repo_file():
+    # When a line is in both, prefer the source the model actually saw.
+    seen = {"x.cbl": FileSource(lines={1: "SEEN-LINE"})}
+    repo_map = build_repo_source_map({"x.cbl": "REPO-LINE\nL2"})
+    info = resolve_citation("x.cbl:1", seen, repo_map)
+    assert info["status"] == "verified"
+    assert info["snippet"] == "SEEN-LINE"
+
+
+def test_verify_page_citations_uses_repo_map_fallback():
+    body = "\n".join(f"line{i}" for i in range(1, 41))  # 40 lines
+    repo_map = build_repo_source_map({"copybook/CLNMSKM.txt": body})
+    content = "Sources: [copybook/CLNMSKM.txt:17-40]()"
+    out = verify_page_citations(content, {}, repo_map)
+    assert out["copybook/CLNMSKM.txt:17-40"]["status"] == "verified"

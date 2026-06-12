@@ -535,6 +535,32 @@ def test_page_citations_verified_and_broken(tmp_path):
     assert cites["ghost.py:1-2"]["reason"] == "file not provided"
 
 
+def test_citations_verify_against_full_repo_file_via_fallback(tmp_path, monkeypatch):
+    # Lines 17-40 of big.py are never in the retrieved chunk, but the citation
+    # still verifies against the full repo file read from the local clone.
+    repo_dir = tmp_path / "clone"
+    repo_dir.mkdir()
+    (repo_dir / "big.py").write_text("\n".join(f"line{i}" for i in range(1, 41)))
+
+    class RepoRAG(FakeRAG):
+        def prepare_retriever(self, *args):
+            super().prepare_retriever(*args)
+            self.db_manager = SimpleNamespace(
+                repo_paths={"save_repo_dir": str(repo_dir)})
+            self.transformed_docs = [SimpleNamespace(meta_data={"file_path": "big.py"})]
+    monkeypatch.setattr(wiki_generator, "RAG", RepoRAG)
+
+    body = "# P\n\nClaim. Sources: [big.py:17-40]()"
+    job = make_job(self_review=False)
+    dispatch = FakeDispatch([STRUCTURE_XML, body, body, body])
+
+    run(run_generation(job, dispatch))
+
+    cites = next(iter(read_cache(tmp_path, job)["generated_pages"].values()))["citations"]
+    assert cites["big.py:17-40"]["status"] == "verified"
+    assert cites["big.py:17-40"]["snippet"].startswith("line17")
+
+
 def test_deep_dive_citations_grounded_on_truncated_source(tmp_path, monkeypatch):
     xml = """<wiki_structure><title>T</title><description>D</description><pages>
       <page id="page-analysis-prog"><title>Prog</title>

@@ -25,11 +25,12 @@ from urllib.parse import unquote
 
 from api.api import (RepoInfo, WikiCacheRequest, WikiPage, WikiStructureModel,
                      get_wiki_cache_path, save_wiki_cache)
-from api.data_pipeline import count_tokens, get_file_content
+from api.data_pipeline import count_tokens, get_file_content, read_repo_files
 from api.prompt_assembly import (assemble_envelope, fit_envelope_inputs,
                                  format_context_text, number_source_lines,
                                  select_generation_system_prompt)
-from api.citation_grounding import build_source_map, verify_page_citations
+from api.citation_grounding import (build_repo_source_map, build_source_map,
+                                    verify_page_citations)
 from api.rag import RAG
 from api.repo_tree import fetch_repo_tree
 from api.wiki_prompts import (build_page_prompt, build_page_rag_query,
@@ -283,6 +284,17 @@ async def run_generation(
         split_filter(job.included_dirs), split_filter(job.included_files))
     logger.info(f"Retriever prepared for {repo_url}")
 
+    # Full repo files for citation grounding: a citation to a real file + real
+    # line range should verify even when those lines were not among the chunks
+    # the model saw. Read the indexed files once from the local clone. Degrade
+    # gracefully (seen-only grounding) if the clone/docs aren't available.
+    db_manager = getattr(rag, "db_manager", None)
+    repo_dir = (getattr(db_manager, "repo_paths", None) or {}).get("save_repo_dir")
+    indexed_paths = {d.meta_data.get("file_path") for d in getattr(rag, "transformed_docs", [])
+                     if getattr(d, "meta_data", None) and d.meta_data.get("file_path")}
+    repo_map = build_repo_source_map(read_repo_files(repo_dir, indexed_paths))
+    logger.info(f"Built repo source map for {len(repo_map)} files (citation grounding)")
+
     # 3. File tree + README via provider APIs (identical input to today's flow)
     progress.phase = "structure"
     notify()
@@ -452,7 +464,7 @@ async def run_generation(
                 provider=job.provider)
             rag_for_map = page_documents if fitted_ctx and fitted_ctx == page_context else []
             source_map = build_source_map(fitted_fc, file_path, rag_for_map)
-            citations = verify_page_citations(content, source_map)
+            citations = verify_page_citations(content, source_map, repo_map)
         generated[page["id"]] = {**page, "content": content, "citations": citations}
         progress.pages_done += 1
         progress.current_page_title = ""
