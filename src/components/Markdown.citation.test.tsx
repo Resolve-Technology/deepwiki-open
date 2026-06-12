@@ -18,8 +18,10 @@ const local: RepoInfo = {
   localPath: '/root/.adalflow/repos/x', repoUrl: null,
 };
 
-const render = (content: string, repoInfo?: RepoInfo) =>
-  renderToStaticMarkup(React.createElement(Markdown, { content, repoInfo }));
+const render = (content: string, repoInfo?: RepoInfo, citations?: Record<string, unknown>) =>
+  renderToStaticMarkup(
+    React.createElement(Markdown, { content, repoInfo, citations } as React.ComponentProps<typeof Markdown>),
+  );
 
 describe('Markdown source citations', () => {
   it('rewrites an empty-href citation into a gitlab blob link with line anchor (and strips .git)', () => {
@@ -41,5 +43,47 @@ describe('Markdown source citations', () => {
   it('leaves a real link untouched', () => {
     const html = render('See [the repo](https://gitlab.reslv.one/poc/code2_sqlcbl_cal101)', gitlab);
     expect(html).toContain('href="https://gitlab.reslv.one/poc/code2_sqlcbl_cal101"');
+  });
+});
+
+describe('Markdown citation grounding', () => {
+  it('verified citation with snippet shows the source text, no link', () => {
+    const citations = {
+      'CAL101.txt:51-54': {
+        status: 'verified', filePath: 'CAL101.txt',
+        startLine: 51, endLine: 54, snippet: 'MOVE A TO B',
+      },
+    };
+    const html = render('Sources: [CAL101.txt:51-54]()', gitlab, citations);
+    expect(html).toContain('MOVE A TO B');          // real source text inlined
+    expect(html).not.toContain('/-/blob/');         // no gitlab link
+  });
+
+  it('verified whole-file citation shows a badge, no link', () => {
+    const citations = {
+      'CAL101.txt': { status: 'verified', filePath: 'CAL101.txt' },
+    };
+    const html = render('Sources: [CAL101.txt]()', gitlab, citations);
+    expect(html).toContain('CAL101.txt');
+    expect(html).not.toContain('/-/blob/');
+  });
+
+  it('broken citation shows a red unverified marker, no link', () => {
+    const citations = {
+      'GHOST.txt:1-5': {
+        status: 'broken', filePath: 'GHOST.txt',
+        startLine: 1, endLine: 5, reason: 'file not provided',
+      },
+    };
+    const html = render('Sources: [GHOST.txt:1-5]()', gitlab, citations);
+    expect(html).toContain('unverified');
+    expect(html).not.toContain('/-/blob/');
+  });
+
+  it('citation absent from the map falls back to a blob link (regression)', () => {
+    const html = render('Sources: [CAL101.txt:51-54]()', gitlab);
+    expect(html).toContain(
+      'href="https://gitlab.reslv.one/poc/code2_sqlcbl_cal101/-/blob/main/CAL101.txt#L51-54"',
+    );
   });
 });

@@ -9,7 +9,38 @@ import { tomorrow } from 'react-syntax-highlighter/dist/cjs/styles/prism';
 import Mermaid from './Mermaid';
 import 'katex/dist/katex.min.css';
 import RepoInfo from '@/types/repoinfo';
+import { CitationInfo } from '@/types/wiki/wikipage';
 import { parseCitation, buildBlobUrl, lineAnchor, extractDefaultBranch } from '@/utils/citationUrl';
+
+// A verified citation: shows the cited filename, expandable to the real source
+// text we provided the model. No external link — the text IS the evidence.
+const CitationSnippet: React.FC<{ label: string; snippet?: string }> = ({ label, snippet }) => {
+  const [open, setOpen] = React.useState(false);
+  const badge = "text-green-700 dark:text-green-400 font-medium hover:underline";
+  if (!snippet) {
+    return <span className={badge}>✓ {label}</span>;
+  }
+  return (
+    <span className="citation-verified">
+      <button type="button" onClick={() => setOpen((o) => !o)} className={badge}>
+        ✓ {label}
+      </button>
+      <span
+        className={`block font-mono text-xs whitespace-pre overflow-x-auto my-1 p-2 rounded bg-gray-100 dark:bg-gray-800 ${open ? '' : 'hidden'}`}
+      >
+        {snippet}
+      </span>
+    </span>
+  );
+};
+
+// A broken citation: the cited file/lines were not in the source we gave the
+// model, so the claim may be fabricated.
+const BrokenCitation: React.FC<{ label: string; reason?: string }> = ({ label, reason }) => (
+  <span title={reason} className="text-red-600 dark:text-red-400 font-medium">
+    ⚠ {label} — unverified
+  </span>
+);
 
 // Flatten a react-markdown link's children to plain text, descending through
 // inline wrapper elements (e.g. a bolded citation). Returns null only for
@@ -31,9 +62,10 @@ function nodeToPlainText(node: React.ReactNode): string | null {
 interface MarkdownProps {
   content: string;
   repoInfo?: RepoInfo;
+  citations?: Record<string, CitationInfo>;
 }
 
-const Markdown: React.FC<MarkdownProps> = ({ content, repoInfo }) => {
+const Markdown: React.FC<MarkdownProps> = ({ content, repoInfo, citations }) => {
   const defaultBranch = React.useMemo(() => extractDefaultBranch(content), [content]);
   // Define markdown components
   const MarkdownComponents: React.ComponentProps<typeof ReactMarkdown>['components'] = {
@@ -98,6 +130,13 @@ const Markdown: React.FC<MarkdownProps> = ({ content, repoInfo }) => {
       // Empty href: maybe a "Sources" citation. Get the plain text label.
       const text = nodeToPlainText(children);
       const cite = text ? parseCitation(text) : null;
+      const info = text ? citations?.[text] : undefined;
+      if (text && info) {
+        if (info.status === 'verified') {
+          return <CitationSnippet label={text} snippet={info.snippet} />;
+        }
+        return <BrokenCitation label={text} reason={info.reason} />;
+      }
       if (text && cite && repoInfo) {
         const url = buildBlobUrl(repoInfo, cite.filePath, defaultBranch);
         if (url) {
