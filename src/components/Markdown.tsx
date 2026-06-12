@@ -129,15 +129,16 @@ const Markdown: React.FC<MarkdownProps> = ({ content, repoInfo, citations }) => 
 
       // Empty href: maybe a "Sources" citation. Get the plain text label.
       const text = nodeToPlainText(children);
-      const cite = text ? parseCitation(text) : null;
-      const info = text ? citations?.[text] : undefined;
-      if (text && info) {
+      const citationKey = text?.trim();
+      const cite = citationKey ? parseCitation(citationKey) : null;
+      const info = citationKey ? citations?.[citationKey] : undefined;
+      if (citationKey && info) {
         if (info.status === 'verified') {
-          return <CitationSnippet label={text} snippet={info.snippet} />;
+          return <CitationSnippet label={citationKey} snippet={info.snippet} />;
         }
-        return <BrokenCitation label={text} reason={info.reason} />;
+        return <BrokenCitation label={citationKey} reason={info.reason} />;
       }
-      if (text && cite && repoInfo) {
+      if (citationKey && cite && repoInfo) {
         const url = buildBlobUrl(repoInfo, cite.filePath, defaultBranch);
         if (url) {
           const finalHref = url + lineAnchor(repoInfo.type, cite.startLine, cite.endLine);

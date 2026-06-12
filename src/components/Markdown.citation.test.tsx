@@ -88,4 +88,17 @@ describe('Markdown citation grounding', () => {
       'href="https://gitlab.reslv.one/poc/code2_sqlcbl_cal101/-/blob/main/CAL101.txt#L51-54"',
     );
   });
+
+  it('matches a citation whose link text has surrounding whitespace', () => {
+    const citations = {
+      'CAL101.txt:51-54': {
+        status: 'verified', filePath: 'CAL101.txt',
+        startLine: 51, endLine: 54, snippet: 'MOVE A TO B',
+      },
+    };
+    // Backend stores the key trimmed; the frontend must trim before lookup.
+    const html = render('Sources: [ CAL101.txt:51-54 ]()', gitlab, citations);
+    expect(html).toContain('MOVE A TO B');
+    expect(html).not.toContain('/-/blob/');
+  });
 });
