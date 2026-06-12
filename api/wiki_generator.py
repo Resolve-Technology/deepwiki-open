@@ -41,6 +41,10 @@ logger = logging.getLogger(__name__)
 MAX_STRUCTURE_ATTEMPTS = 3       # same loop as determineWikiStructure
 MAX_CONSECUTIVE_PAGE_FAILURES = 3
 
+# Prefix written to a page's content when generation fails; the citation pass
+# skips these (no source to verify against).
+_ERROR_CONTENT_PREFIX = "Error generating content:"
+
 
 class JobCancelled(Exception):
     """Raised between dispatches when job.cancel_requested is set."""
@@ -399,7 +403,7 @@ async def run_generation(
             raise
         except Exception as e:
             logger.error(f"Error generating content for page {page['id']}: {e}")
-            content = f"Error generating content: {e}"
+            content = f"{_ERROR_CONTENT_PREFIX} {e}"
             consecutive_failures += 1
             if consecutive_failures >= MAX_CONSECUTIVE_PAGE_FAILURES:
                 raise GenerationError(
@@ -435,7 +439,7 @@ async def run_generation(
         # 7. Incremental save after every page
         # Verify citations against the exact source we showed the model, so the
         # UI can show real source text for grounded claims and flag the rest.
-        if content.startswith("Error generating content:"):
+        if content.startswith(_ERROR_CONTENT_PREFIX):
             citations = {}
         else:
             source_map = build_source_map(file_content, file_path, page_documents)

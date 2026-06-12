@@ -67,7 +67,7 @@ class WikiPage(BaseModel):
     filePaths: List[str]
     importance: str # Should ideally be Literal['high', 'medium', 'low']
     relatedPages: List[str]
-    citations: Dict[str, CitationInfo] = {}
+    citations: Dict[str, CitationInfo] = Field(default_factory=dict)
 
 class ProcessedProjectEntry(BaseModel):
     id: str  # Filename
