@@ -77,3 +77,58 @@ def build_source_map(file_content: str, file_path: str, rag_documents) -> Dict[s
     for doc in (rag_documents or []):
         _ingest_chunk(doc, smap)
     return smap
+
+
+# Markdown citations are empty-href links: [label](). Real links have an href
+# and are skipped. Mirrors Markdown.tsx, which only treats empty-href links as
+# citation candidates.
+_EMPTY_LINK_RE = re.compile(r"\[([^\]]+)\]\(\)")
+
+
+def resolve_citation(label: str, source_map: Dict[str, FileSource]) -> Optional[dict]:
+    """Resolve one citation label against the provided source.
+
+    Returns a dict {status, filePath, startLine, endLine, snippet, reason}, or
+    None if ``label`` is not a citation at all.
+    """
+    parsed = parse_citation_label(label)
+    if parsed is None:
+        return None
+    file_path, start, end = parsed
+    info = {"status": "broken", "filePath": file_path, "startLine": start,
+            "endLine": end, "snippet": None, "reason": None}
+
+    fs = source_map.get(file_path)
+    if fs is None:
+        info["reason"] = "file not provided"
+        return info
+
+    if start is None:  # whole-file citation: presence is enough
+        info["status"] = "verified"
+        return info
+
+    needed = list(range(start, (end or start) + 1))
+    if not all(n in fs.lines for n in needed):
+        info["reason"] = "lines not in provided source"
+        return info
+
+    info["status"] = "verified"
+    info["snippet"] = "\n".join(fs.lines[n] for n in needed)
+    return info
+
+
+def verify_page_citations(content: str, source_map: Dict[str, FileSource]) -> Dict[str, dict]:
+    """Resolve every `[label]()` citation in the page markdown.
+
+    Returns {label: resolved-info}. Non-citation empty links are skipped;
+    repeated labels collapse to one entry.
+    """
+    out: Dict[str, dict] = {}
+    for label in _EMPTY_LINK_RE.findall(content or ""):
+        label = label.strip()
+        if label in out:
+            continue
+        info = resolve_citation(label, source_map)
+        if info is not None:
+            out[label] = info
+    return out

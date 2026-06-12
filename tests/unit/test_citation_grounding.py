@@ -2,7 +2,8 @@
 from types import SimpleNamespace
 
 from api.citation_grounding import (FileSource, build_source_map,
-                                    parse_citation_label)
+                                    parse_citation_label, resolve_citation,
+                                    verify_page_citations)
 from api.prompt_assembly import number_source_lines
 
 
@@ -51,3 +52,85 @@ def test_build_source_map_ignores_docs_without_file_path():
     doc = SimpleNamespace(text="x", meta_data={})
     smap = build_source_map("", "", [doc])
     assert smap == {}
+
+
+def _smap():
+    return {"prog.cbl": FileSource(lines={12: "MOVE A TO B", 13: "ADD 1 TO C"})}
+
+
+def test_resolve_verified_range_returns_snippet():
+    info = resolve_citation("prog.cbl:12-13", _smap())
+    assert info["status"] == "verified"
+    assert info["snippet"] == "MOVE A TO B\nADD 1 TO C"
+    assert info["filePath"] == "prog.cbl"
+    assert info["startLine"] == 12 and info["endLine"] == 13
+
+
+def test_resolve_verified_single_line():
+    info = resolve_citation("prog.cbl:12", _smap())
+    assert info["status"] == "verified"
+    assert info["snippet"] == "MOVE A TO B"
+
+
+def test_resolve_broken_file_not_provided():
+    info = resolve_citation("ghost.cbl:1-3", _smap())
+    assert info["status"] == "broken"
+    assert info["reason"] == "file not provided"
+    assert info["snippet"] is None
+
+
+def test_resolve_broken_lines_out_of_range():
+    info = resolve_citation("prog.cbl:12-99", _smap())
+    assert info["status"] == "broken"
+    assert info["reason"] == "lines not in provided source"
+
+
+def test_resolve_whole_file_present_is_verified_without_snippet():
+    info = resolve_citation("prog.cbl", _smap())
+    assert info["status"] == "verified"
+    assert info["snippet"] is None
+
+
+def test_resolve_whole_file_absent_is_broken():
+    info = resolve_citation("ghost.cbl", _smap())
+    assert info["status"] == "broken"
+    assert info["reason"] == "file not provided"
+
+
+def test_resolve_line_range_when_no_line_info_is_broken():
+    # File present but no line text (old RAG chunk) -> ranged cite can't verify.
+    info = resolve_citation("a.py:5", {"a.py": FileSource(lines={})})
+    assert info["status"] == "broken"
+    assert info["reason"] == "lines not in provided source"
+
+
+def test_resolve_non_citation_returns_none():
+    assert resolve_citation("just prose", _smap()) is None
+
+
+def test_verify_page_citations_extracts_empty_href_links_only():
+    content = (
+        "Intro. Sources: [prog.cbl:12-13]()\n\n"
+        "More. Sources: [ghost.cbl:1-2]()\n\n"
+        "A real link [docs](https://example.com/x) and prose [not a cite]()."
+    )
+    out = verify_page_citations(content, _smap())
+    assert out["prog.cbl:12-13"]["status"] == "verified"
+    assert out["ghost.cbl:1-2"]["status"] == "broken"
+    # Real-href link and the non-citation empty link are not included.
+    assert "docs" not in out
+    assert "not a cite" not in out
+
+
+def test_verify_page_citations_dedupes_repeated_label():
+    content = "Sources: [prog.cbl:12](). Again Sources: [prog.cbl:12]()."
+    out = verify_page_citations(content, _smap())
+    assert list(out.keys()) == ["prog.cbl:12"]
+
+
+def test_verify_page_citations_round_trip_with_numbered_source():
+    # number_source_lines -> build_source_map -> verify recovers the real lines.
+    numbered = number_source_lines("FIRST LINE\nSECOND LINE\nTHIRD LINE")
+    smap = build_source_map(numbered, "x.cbl", [])
+    out = verify_page_citations("Sources: [x.cbl:1-2]()", smap)
+    assert out["x.cbl:1-2"]["snippet"] == "FIRST LINE\nSECOND LINE"
