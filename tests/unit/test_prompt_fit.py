@@ -1,4 +1,6 @@
 """Tests for provider-aware prompt budget fitting."""
+import importlib
+
 from api.prompt_fit import fit_to_budget, prompt_token_budget
 
 
@@ -6,9 +8,18 @@ def test_budget_for_claude_is_large():
     assert prompt_token_budget("claude") >= 500_000
 
 
-def test_budget_default_is_conservative():
-    assert prompt_token_budget("vllm") == 24_000
-    assert prompt_token_budget("unknown-provider") == 24_000
+def test_budget_default_is_conservative(monkeypatch):
+    # The deployment may override DEEPWIKI_PROMPT_TOKEN_BUDGET (read at
+    # import time); clear it and reload to assert the shipped default.
+    monkeypatch.delenv("DEEPWIKI_PROMPT_TOKEN_BUDGET", raising=False)
+    import api.prompt_fit as pf
+    importlib.reload(pf)
+    try:
+        assert pf.prompt_token_budget("vllm") == 24_000
+        assert pf.prompt_token_budget("unknown-provider") == 24_000
+    finally:
+        monkeypatch.undo()
+        importlib.reload(pf)
 
 
 def test_fit_noop_when_under_budget():
