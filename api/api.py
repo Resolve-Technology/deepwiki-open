@@ -47,6 +47,16 @@ def get_adalflow_default_root_path():
     return os.path.expanduser(os.path.join("~", ".adalflow"))
 
 # --- Pydantic Models ---
+class CitationInfo(BaseModel):
+    """Verification verdict for one source citation on a wiki page."""
+    status: str  # "verified" | "broken"
+    filePath: str
+    startLine: Optional[int] = None
+    endLine: Optional[int] = None
+    snippet: Optional[str] = None
+    reason: Optional[str] = None
+
+
 class WikiPage(BaseModel):
     """
     Model for a wiki page.
@@ -57,6 +67,7 @@ class WikiPage(BaseModel):
     filePaths: List[str]
     importance: str # Should ideally be Literal['high', 'medium', 'low']
     relatedPages: List[str]
+    citations: Dict[str, CitationInfo] = {}
 
 class ProcessedProjectEntry(BaseModel):
     id: str  # Filename
