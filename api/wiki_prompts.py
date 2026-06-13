@@ -543,6 +543,43 @@ def build_self_review_prompt(page_title: str, file_paths: List[str],
 
 
 # ---------------------------------------------------------------------------
+# Citation-fix prompt (correct or remove claims whose citations didn't verify)
+# ---------------------------------------------------------------------------
+
+def build_citation_fix_prompt(page_title: str, file_paths: List[str],
+                             content: str, broken: List[tuple],
+                             repo_url: str) -> str:
+    """Prompt the model to fix or remove ONLY the claims whose citations could
+    not be found in the repository's actual source.
+
+    ``broken`` is a list of ``(citation_label, reason)`` pairs, e.g.
+    ``("ghost.py:9-9", "file not provided")``.
+    """
+    files_joined = ", ".join(file_paths)
+    listed = "\n".join(f"- {label} ({reason})" for label, reason in broken)
+    return (
+        f"You are correcting a documentation page generated for the repository {repo_url}. "
+        "You have access to the repository's actual source code through the provided context.\n"
+        "\n"
+        "The citations listed below could NOT be found in the repository's actual source — "
+        "the file is missing or the cited lines do not exist:\n"
+        f"{listed}\n"
+        "\n"
+        "For EACH listed citation, either correct the claim so it matches the real code (and cite "
+        "the correct file and line numbers), or remove the claim entirely. Do NOT add any new claim "
+        "that is not directly supported by the provided source. Keep the page's structure, level of "
+        "detail, and language.\n"
+        "\n"
+        "Reply with the COMPLETE corrected page in markdown — no preamble, no explanation, no code "
+        "fence around the whole page.\n"
+        "\n"
+        f"<page title=\"{page_title}\" files=\"{files_joined}\">\n"
+        f"{content}\n"
+        "</page>"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Revised-content safety gate (ported from wikiRevision.ts parseRevisedContent)
 # ---------------------------------------------------------------------------
 

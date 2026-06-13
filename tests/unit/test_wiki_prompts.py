@@ -302,3 +302,20 @@ def test_parse_revised_content_returns_cleaned():
     content, changed = parse_revised_content(original, response)
     assert changed
     assert content == response
+
+
+def test_build_citation_fix_prompt_lists_every_broken_citation():
+    from api.wiki_prompts import build_citation_fix_prompt
+    content = "# Page\n\nClaim. Sources: [ghost.py:9-9]()"
+    broken = [
+        ("ghost.py:9-9", "file not provided"),
+        ("x.py:5-6", "lines not in provided source"),
+    ]
+    prompt = build_citation_fix_prompt(
+        "My Page", ["a.py"], content, broken, "https://github.com/o/r")
+    assert "ghost.py:9-9" in prompt
+    assert "file not provided" in prompt
+    assert "x.py:5-6" in prompt
+    assert "lines not in provided source" in prompt
+    assert content in prompt
+    assert "My Page" in prompt
