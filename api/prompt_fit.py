@@ -23,19 +23,53 @@ log = logging.getLogger(__name__)
 CHARS_PER_TOKEN = 4
 TRUNCATION_MARKER = "\n\n*** [TRUNCATED: middle of file omitted to fit the model's context window] ***\n\n"
 
-# Conservative defaults; override per deployment via env if needed.
-# 24k (not higher) because the 4-chars/token estimate UNDERCOUNTS dense
-# COBOL tokens (short keywords, numerics) — keep ~20% slack vs the model
-# context rather than sail close to it.
+# Conservative default for non-Claude providers (local vLLM/gemma etc.). The
+# 4-chars/token estimate UNDERCOUNTS dense COBOL tokens, so keep slack vs the
+# model context. Override per deployment via DEEPWIKI_PROMPT_TOKEN_BUDGET.
 _DEFAULT_BUDGET = int(os.getenv("DEEPWIKI_PROMPT_TOKEN_BUDGET", "24000"))
-_PROVIDER_BUDGETS = {
-    "claude": int(os.getenv("DEEPWIKI_CLAUDE_PROMPT_TOKEN_BUDGET", "800000")),
-}
+
+# Claude context windows. Models carrying the 1M-context beta tag "[1m]" in
+# their id get the large window; every other Claude model is 200k.
+_CLAUDE_1M_CONTEXT = 1_000_000
+_CLAUDE_STD_CONTEXT = 200_000
+# Fallback completion reservation when a model's max_tokens is not in
+# generator.json (matches the haiku/sonnet default).
+_CLAUDE_DEFAULT_OUTPUT_RESERVE = 64_000
+# Extra slack below (context - max_tokens): the char/token estimate can
+# undercount real Anthropic tokens (CJK, dense COBOL), so never sail right up
+# to the limit.
+_CLAUDE_SAFETY_MARGIN = 8_000
+_CLAUDE_MIN_BUDGET = 20_000
 
 
-def prompt_token_budget(provider: str) -> int:
-    """Return the prompt token budget for a provider."""
-    return _PROVIDER_BUDGETS.get(provider, _DEFAULT_BUDGET)
+def _claude_output_reserve(model: str) -> int:
+    """The model's configured max_tokens (its completion reservation), or 0 if
+    unknown. Lazy import keeps this module free of an import cycle with config."""
+    try:
+        from api.config import get_model_config
+        mk = get_model_config("claude", model).get("model_kwargs", {})
+        return int(mk.get("max_tokens", 0) or 0)
+    except Exception:
+        return 0
+
+
+def prompt_token_budget(provider: str, model: str = "") -> int:
+    """Prompt (input) token budget for a provider/model.
+
+    For Claude the budget is the model's context window minus its completion
+    reservation (max_tokens) minus a safety margin, so the assembled prompt AND
+    the model's response both fit the context window. A flat budget cannot do
+    this: haiku/sonnet reserve 64k, opus 100k, and a 1M-context model has a 5x
+    larger window. ``DEEPWIKI_CLAUDE_PROMPT_TOKEN_BUDGET`` overrides if set.
+    """
+    if provider != "claude":
+        return _DEFAULT_BUDGET
+    override = os.getenv("DEEPWIKI_CLAUDE_PROMPT_TOKEN_BUDGET")
+    if override:
+        return int(override)
+    ctx = _CLAUDE_1M_CONTEXT if "[1m]" in model else _CLAUDE_STD_CONTEXT
+    reserve = _claude_output_reserve(model) or _CLAUDE_DEFAULT_OUTPUT_RESERVE
+    return max(ctx - reserve - _CLAUDE_SAFETY_MARGIN, _CLAUDE_MIN_BUDGET)
 
 
 def _estimate_tokens(text: str) -> int:

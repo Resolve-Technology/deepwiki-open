@@ -303,7 +303,7 @@ async def chat_completions_stream(request: ChatCompletionRequest):
                 system_prompt + conversation_history + query,
                 is_ollama_embedder=(request.provider == "ollama"),
             ),
-            budget=prompt_token_budget(request.provider),
+            budget=prompt_token_budget(request.provider, request.model),
         )
 
         # Create the prompt with context

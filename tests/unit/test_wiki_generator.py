@@ -572,7 +572,7 @@ def test_deep_dive_citations_grounded_on_truncated_source(tmp_path, monkeypatch)
     # Simulate the budget keeping numbered lines 1-2 (head) and 6 (tail), the
     # middle dropped, and RAG context dropped entirely.
     def fake_fit(system_prompt, query, *, conversation_history="",
-                 file_content="", context_text="", provider=""):
+                 file_content="", context_text="", provider="", model=""):
         kept = ("     1 | AAA\n     2 | BBB\n"
                 "*** [TRUNCATED] ***\n     6 | FFF")
         return kept, ""

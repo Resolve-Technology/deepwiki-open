@@ -196,7 +196,7 @@ def test_fit_envelope_inputs_returns_inputs_when_within_budget():
 
 def test_fit_envelope_inputs_drops_rag_and_truncates_when_over_budget(monkeypatch):
     import api.prompt_assembly as pa
-    monkeypatch.setattr(pa, "prompt_token_budget", lambda provider: 1)
+    monkeypatch.setattr(pa, "prompt_token_budget", lambda provider, model="": 1)
     fc, ctx = fit_envelope_inputs("sys", "q", file_content="x" * 40,
                                   context_text="y" * 40, provider="vllm")
     # Over budget with a file present: RAG context is dropped first, then the

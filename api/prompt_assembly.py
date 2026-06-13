@@ -130,7 +130,8 @@ def fit_envelope_inputs(system_prompt: str, query: str, *,
                         conversation_history: str = "",
                         file_content: str = "",
                         context_text: str = "",
-                        provider: str = ""):
+                        provider: str = "",
+                        model: str = ""):
     """Apply the provider budget fit to ``(file_content, context_text)`` exactly
     as :func:`assemble_envelope` does, and return the fitted pair.
 
@@ -145,7 +146,7 @@ def fit_envelope_inputs(system_prompt: str, query: str, *,
             system_prompt + conversation_history + query,
             is_ollama_embedder=(provider == "ollama"),
         ),
-        budget=prompt_token_budget(provider),
+        budget=prompt_token_budget(provider, model),
     )
 
 
@@ -154,19 +155,22 @@ def assemble_envelope(system_prompt: str, query: str, *,
                       file_content: str = "",
                       file_path: str = "",
                       context_text: str = "",
-                      provider: str = "") -> str:
+                      provider: str = "",
+                      model: str = "") -> str:
     """The exact prompt assembly from ``websocket_wiki.py`` (incl. budget fit).
 
-    ``provider`` selects the token budget (claude gets the large one) just as
-    the websocket passes ``request.provider`` to ``prompt_token_budget``.
+    ``provider``/``model`` select the token budget (a 200k Claude model reserves
+    room for its completion; a 1M model gets a far larger budget) just as the
+    websocket passes ``request.provider``/``request.model`` to the budget fit.
     """
-    # Fit oversized inputs (full program sources) to the provider's context budget
+    # Fit oversized inputs (full program sources) to the model's context budget
     file_content, context_text = fit_envelope_inputs(
         system_prompt, query,
         conversation_history=conversation_history,
         file_content=file_content,
         context_text=context_text,
         provider=provider,
+        model=model,
     )
 
     # Create the prompt with context

@@ -72,6 +72,7 @@ class GroundingContext:
     page_documents: list
     repo_map: dict
     provider: str
+    model: str
     repo_url: str
     page_title: str
     file_paths: list
@@ -81,7 +82,7 @@ def _verify_citations(content: str, ctx: "GroundingContext") -> Dict[str, dict]:
     """Verify citations against the post-budget-fit source + the repo files."""
     fitted_fc, fitted_ctx = fit_envelope_inputs(
         ctx.system_prompt, ctx.page_inner, file_content=ctx.file_content,
-        context_text=ctx.page_context, provider=ctx.provider)
+        context_text=ctx.page_context, provider=ctx.provider, model=ctx.model)
     rag_for_map = (ctx.page_documents
                    if fitted_ctx and fitted_ctx == ctx.page_context else [])
     source_map = build_source_map(fitted_fc, ctx.file_path, rag_for_map)
@@ -112,6 +113,7 @@ async def ground_page_citations(content: str, ctx: "GroundingContext",
         fix_prompt = assemble_envelope(
             ctx.system_prompt, fix_inner, file_content=ctx.file_content,
             file_path=ctx.file_path, context_text=ctx.page_context,
+            model=ctx.model,
             provider=ctx.provider)
         try:
             revised = await dispatch(fix_prompt, stats)
@@ -396,7 +398,7 @@ async def run_generation(
     structure_context, _ = await retrieve_for_generation(structure_inner)
     structure_prompt = assemble_envelope(system_prompt, structure_inner,
                                          context_text=structure_context,
-                                         provider=job.provider)
+                                         provider=job.provider, model=job.model)
     structure: Optional[Dict[str, Any]] = None
     last_parse_error: Optional[GenerationError] = None
     saw_xml = False
@@ -485,7 +487,7 @@ async def run_generation(
             prompt = assemble_envelope(system_prompt, page_inner,
                                        file_content=file_content, file_path=file_path,
                                        context_text=page_context,
-                                       provider=job.provider)
+                                       provider=job.provider, model=job.model)
             content = await timed_dispatch(prompt, stats_generation)
             # Clean up markdown delimiters (same regexes as generatePageContent)
             content = re.sub(r"^```markdown\s*", "", content, flags=re.IGNORECASE)
@@ -518,7 +520,7 @@ async def run_generation(
                 review_prompt = assemble_envelope(
                     system_prompt, review_inner, context_text=context_text,
                     file_content=file_content, file_path=file_path,
-                    provider=job.provider)
+                    provider=job.provider, model=job.model)
                 response = await timed_dispatch(review_prompt, stats_review)
                 content, changed = parse_revised_content(content, response)
                 if changed:
@@ -538,7 +540,8 @@ async def run_generation(
                 system_prompt=system_prompt, page_inner=page_inner,
                 file_content=file_content, file_path=file_path,
                 page_context=page_context, page_documents=page_documents,
-                repo_map=repo_map, provider=job.provider, repo_url=repo_url,
+                repo_map=repo_map, provider=job.provider, model=job.model,
+                repo_url=repo_url,
                 page_title=page["title"], file_paths=page["filePaths"])
             content, citations = await ground_page_citations(
                 content, ground_ctx, timed_dispatch, stats_review)

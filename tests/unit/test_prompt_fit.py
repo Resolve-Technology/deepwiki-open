@@ -4,8 +4,48 @@ import importlib
 from api.prompt_fit import fit_to_budget, prompt_token_budget
 
 
-def test_budget_for_claude_is_large():
-    assert prompt_token_budget("claude") >= 500_000
+def test_budget_claude_200k_model_leaves_completion_room():
+    # A 200k-context Claude model must reserve room for its completion, so the
+    # input budget is well under 200k — otherwise a full-program prompt + the
+    # response overflow the context window (the B5349 "prompt is too long" bug).
+    budget = prompt_token_budget("claude", "claude-haiku-4-5-20251001")
+    assert budget < 200_000
+    assert budget <= 200_000 - 64_000  # haiku max_tokens reserved
+    assert budget >= 100_000
+
+
+def test_budget_opus_reserves_more_than_haiku():
+    # opus-4-8 reserves 100k for completion vs haiku's 64k, so opus gets a
+    # SMALLER input budget on the same 200k window — proves it's per-model.
+    assert (prompt_token_budget("claude", "claude-opus-4-8")
+            < prompt_token_budget("claude", "claude-haiku-4-5-20251001"))
+
+
+def test_budget_claude_1m_model_is_large():
+    # A model carrying the "[1m]" beta tag gets the 1M context window.
+    assert prompt_token_budget("claude", "claude-opus-4-8[1m]") >= 800_000
+
+
+def test_budget_claude_unknown_model_still_under_200k():
+    # Unknown model -> fallback completion reserve, still safely under 200k.
+    assert prompt_token_budget("claude", "claude-future-x") < 200_000
+
+
+def test_budget_claude_env_override_wins(monkeypatch):
+    monkeypatch.setenv("DEEPWIKI_CLAUDE_PROMPT_TOKEN_BUDGET", "150000")
+    assert prompt_token_budget("claude", "claude-haiku-4-5-20251001") == 150_000
+
+
+def test_oversized_program_truncated_under_claude_budget():
+    # Regression for B5349: a ~210k-token program (the size that 400'd) must now
+    # be truncated to fit the model-aware budget instead of being sent whole.
+    budget = prompt_token_budget("claude", "claude-haiku-4-5-20251001")
+    big = "HEAD" + ("M" * (210_000 * 4)) + "TAIL"
+    fc, _ = fit_to_budget(file_content=big, context_text="",
+                          base_tokens=2000, budget=budget)
+    assert "[TRUNCATED" in fc
+    assert len(fc) < len(big)
+    assert (len(fc) // 4) + 2000 <= budget
 
 
 def test_budget_default_is_conservative(monkeypatch):
