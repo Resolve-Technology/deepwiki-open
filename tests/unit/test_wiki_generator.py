@@ -590,3 +590,65 @@ def test_deep_dive_citations_grounded_on_truncated_source(tmp_path, monkeypatch)
     assert cites["prog.cbl:1-2"]["status"] == "verified"
     assert cites["prog.cbl:3-4"]["status"] == "broken"   # dropped middle line
     assert cites["prog.cbl:6"]["status"] == "verified"
+
+
+SINGLE_PAGE_XML = """<wiki_structure>
+  <title>T</title><description>d</description>
+  <sections><section id="s1"><title>S</title><page_ref>p1</page_ref></section></sections>
+  <pages><page id="p1"><title>Page One</title><importance>high</importance>
+    <relevant_files><file_path>a.py</file_path></relevant_files></page></pages>
+</wiki_structure>"""
+
+
+def test_citation_fix_corrects_broken_page(tmp_path, monkeypatch):
+    # Non-empty repo_map so correction runs; a.py lines 1-3 exist, ghost.py absent.
+    monkeypatch.setattr(wiki_generator, "read_repo_files",
+                        lambda *a, **k: {"a.py": "alpha\nbeta\ngamma"})
+    job = make_job(self_review=False)
+    broken_page = "# Page\n\nClaim. Sources: [ghost.py:9-9]()"
+    fixed_page = "# Page\n\nClaim. Sources: [a.py:1-2]()"
+    dispatch = FakeDispatch([SINGLE_PAGE_XML, broken_page, fixed_page])
+
+    run(run_generation(job, dispatch))
+
+    content = read_cache(tmp_path, job)["generated_pages"]["p1"]["content"]
+    assert "ghost.py" not in content
+    assert "a.py:1-2" in content
+    # structure + page + one fix dispatch
+    assert len(dispatch.prompts) == 3
+
+
+def test_unfixable_claims_are_stripped(tmp_path, monkeypatch):
+    monkeypatch.setattr(wiki_generator, "read_repo_files",
+                        lambda *a, **k: {"a.py": "alpha\nbeta\ngamma"})
+    job = make_job(self_review=False)
+    page = ("# Page\n\n"
+            "Real claim. Sources: [a.py:1-2]()\n\n"
+            "Fabricated claim. Sources: [ghost.py:9-9]()")
+    # Model fails to fix on both attempts (returns the same broken page).
+    dispatch = FakeDispatch([SINGLE_PAGE_XML, page, page, page])
+
+    run(run_generation(job, dispatch))
+
+    content = read_cache(tmp_path, job)["generated_pages"]["p1"]["content"]
+    assert "Real claim" in content
+    assert "Fabricated claim" not in content
+    assert "ghost.py" not in content
+    # structure + page + 2 fix attempts
+    assert len(dispatch.prompts) == 4
+
+
+def test_empty_repo_map_skips_correction_and_strip(tmp_path, monkeypatch):
+    # Outage guard: nothing to verify against -> leave the page untouched.
+    monkeypatch.setattr(wiki_generator, "read_repo_files", lambda *a, **k: {})
+    job = make_job(self_review=False)
+    page = "# Page\n\nClaim. Sources: [ghost.py:9-9]()"
+    dispatch = FakeDispatch([SINGLE_PAGE_XML, page])
+
+    run(run_generation(job, dispatch))
+
+    data = read_cache(tmp_path, job)["generated_pages"]["p1"]
+    assert data["content"] == page
+    assert "ghost.py" in data["content"]
+    assert len(dispatch.prompts) == 2  # no fix dispatch
+    assert data["citations"]["ghost.py:9-9"]["status"] == "broken"

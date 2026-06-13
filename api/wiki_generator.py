@@ -31,16 +31,21 @@ from api.prompt_assembly import (assemble_envelope, fit_envelope_inputs,
                                  select_generation_system_prompt)
 from api.citation_grounding import (build_repo_source_map, build_source_map,
                                     verify_page_citations)
+from api.citation_stripping import strip_unverified_claims
 from api.rag import RAG
 from api.repo_tree import fetch_repo_tree
-from api.wiki_prompts import (build_page_prompt, build_page_rag_query,
-                              build_self_review_prompt, build_structure_prompt,
-                              get_clone_default_branch, parse_revised_content)
+from api.wiki_prompts import (build_citation_fix_prompt, build_page_prompt,
+                              build_page_rag_query, build_self_review_prompt,
+                              build_structure_prompt, get_clone_default_branch,
+                              parse_revised_content)
 
 logger = logging.getLogger(__name__)
 
 MAX_STRUCTURE_ATTEMPTS = 3       # same loop as determineWikiStructure
 MAX_CONSECUTIVE_PAGE_FAILURES = 3
+
+# How many targeted fix passes to attempt before stripping what's still broken.
+MAX_CITATION_FIX_ATTEMPTS = int(os.environ.get("WIKI_CITATION_FIX_ATTEMPTS", "2"))
 
 # Prefix written to a page's content when generation fails; the citation pass
 # skips these (no source to verify against).
@@ -53,6 +58,79 @@ class JobCancelled(Exception):
 
 class GenerationError(Exception):
     """A job-fatal generation failure (bad structure, repeated page errors)."""
+
+
+@dataclass
+class GroundingContext:
+    """Everything needed to (re)verify one page's citations against the source
+    the model was shown (fitted file + RAG chunks) plus the full repo files."""
+    system_prompt: str
+    page_inner: str
+    file_content: str
+    file_path: str
+    page_context: str
+    page_documents: list
+    repo_map: dict
+    provider: str
+    repo_url: str
+    page_title: str
+    file_paths: list
+
+
+def _verify_citations(content: str, ctx: "GroundingContext") -> Dict[str, dict]:
+    """Verify citations against the post-budget-fit source + the repo files."""
+    fitted_fc, fitted_ctx = fit_envelope_inputs(
+        ctx.system_prompt, ctx.page_inner, file_content=ctx.file_content,
+        context_text=ctx.page_context, provider=ctx.provider)
+    rag_for_map = (ctx.page_documents
+                   if fitted_ctx and fitted_ctx == ctx.page_context else [])
+    source_map = build_source_map(fitted_fc, ctx.file_path, rag_for_map)
+    return verify_page_citations(content, source_map, ctx.repo_map)
+
+
+async def ground_page_citations(content: str, ctx: "GroundingContext",
+                               dispatch, stats) -> tuple:
+    """Verify citations, correct ungrounded claims, then strip any that remain.
+
+    Returns ``(content, citations)``. When ``ctx.repo_map`` is empty we cannot
+    trust brokenness — an embedder outage leaves nothing to verify against, so
+    EVERY citation would resolve broken — and we return the page unchanged
+    (today's behavior) rather than delete correct content.
+    """
+    citations = _verify_citations(content, ctx)
+    if not ctx.repo_map:
+        return content, citations
+
+    for _ in range(MAX_CITATION_FIX_ATTEMPTS):
+        broken = [(label, info.get("reason") or "")
+                  for label, info in citations.items()
+                  if info["status"] == "broken"]
+        if not broken:
+            return content, citations
+        fix_inner = build_citation_fix_prompt(
+            ctx.page_title, ctx.file_paths, content, broken, ctx.repo_url)
+        fix_prompt = assemble_envelope(
+            ctx.system_prompt, fix_inner, file_content=ctx.file_content,
+            file_path=ctx.file_path, context_text=ctx.page_context,
+            provider=ctx.provider)
+        try:
+            revised = await dispatch(fix_prompt, stats)
+        except Exception as e:
+            logger.warning(f"Citation fix dispatch failed: {e}")
+            break
+        revised = re.sub(r"^```markdown\s*", "", revised, flags=re.IGNORECASE)
+        revised = re.sub(r"```\s*$", "", revised, flags=re.IGNORECASE)
+        revised = revised.strip()
+        if not revised or revised.startswith("Error"):
+            break
+        content = revised
+        citations = _verify_citations(content, ctx)
+
+    if any(info["status"] == "broken" for info in citations.values()):
+        content = strip_unverified_claims(content, citations)
+        citations = _verify_citations(content, ctx)
+        logger.info("Stripped unverified claims after citation-fix attempts")
+    return content, citations
 
 
 @dataclass
@@ -448,23 +526,20 @@ async def run_generation(
             except Exception as e:
                 logger.warning(f"Self-review failed for {page['title']}, keeping original: {e}")
 
-        # 7. Incremental save after every page
-        # Verify citations against the exact source we showed the model, so the
-        # UI can show real source text for grounded claims and flag the rest.
+        # 7. Citation grounding: verify, correct ungrounded claims, strip the
+        # rest. The outage guard inside ground_page_citations leaves the page
+        # untouched when there are no repo files to verify against.
         if content.startswith(_ERROR_CONTENT_PREFIX):
             citations = {}
         else:
-            # Ground citations against what the model ACTUALLY saw: the budget fit
-            # may truncate the deep-dive file's middle or drop RAG context, so
-            # rebuild from the fitted inputs (a citation to a dropped line must
-            # resolve broken, not falsely verified).
-            fitted_fc, fitted_ctx = fit_envelope_inputs(
-                system_prompt, page_inner,
-                file_content=file_content, context_text=page_context,
-                provider=job.provider)
-            rag_for_map = page_documents if fitted_ctx and fitted_ctx == page_context else []
-            source_map = build_source_map(fitted_fc, file_path, rag_for_map)
-            citations = verify_page_citations(content, source_map, repo_map)
+            ground_ctx = GroundingContext(
+                system_prompt=system_prompt, page_inner=page_inner,
+                file_content=file_content, file_path=file_path,
+                page_context=page_context, page_documents=page_documents,
+                repo_map=repo_map, provider=job.provider, repo_url=repo_url,
+                page_title=page["title"], file_paths=page["filePaths"])
+            content, citations = await ground_page_citations(
+                content, ground_ctx, timed_dispatch, stats_review)
         generated[page["id"]] = {**page, "content": content, "citations": citations}
         progress.pages_done += 1
         progress.current_page_title = ""
