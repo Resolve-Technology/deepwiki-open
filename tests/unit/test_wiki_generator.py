@@ -652,3 +652,20 @@ def test_empty_repo_map_skips_correction_and_strip(tmp_path, monkeypatch):
     assert "ghost.py" in data["content"]
     assert len(dispatch.prompts) == 2  # no fix dispatch
     assert data["citations"]["ghost.py:9-9"]["status"] == "broken"
+
+
+def test_cancel_during_citation_fix_propagates(tmp_path, monkeypatch):
+    # A JobCancelled raised during the citation fix dispatch must propagate out
+    # of run_generation, not be swallowed by the broad except in the fix loop.
+    # FakeDispatch raises Exception items directly, simulating checkpoint() firing
+    # inside timed_dispatch at the start of the fix call.
+    monkeypatch.setattr(wiki_generator, "read_repo_files",
+                        lambda *a, **k: {"a.py": "alpha\nbeta\ngamma"})
+    job = make_job(self_review=False)
+    broken_page = "# Page\n\nClaim. Sources: [ghost.py:9-9]()"
+
+    # Script: structure, broken page, then JobCancelled on the fix dispatch.
+    dispatch = FakeDispatch([SINGLE_PAGE_XML, broken_page, JobCancelled()])
+
+    with pytest.raises(JobCancelled):
+        run(run_generation(job, dispatch))

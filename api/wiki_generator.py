@@ -115,6 +115,8 @@ async def ground_page_citations(content: str, ctx: "GroundingContext",
             provider=ctx.provider)
         try:
             revised = await dispatch(fix_prompt, stats)
+        except JobCancelled:
+            raise
         except Exception as e:
             logger.warning(f"Citation fix dispatch failed: {e}")
             break
