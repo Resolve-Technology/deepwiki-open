@@ -1,0 +1,33 @@
+# Internet exposure for deepwiki via Cloudflare Tunnel + Caddy basic auth.
+#
+# Brings up two extra services on the same network as the existing `deepwiki`
+# service. No host ports are published — cloudflared dials OUT to Cloudflare, so
+# there are no inbound firewall holes. The only public path is:
+#
+#   Internet -> Cloudflare edge (TLS) -> cloudflared -> caddy (basic auth) -> deepwiki
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d
+#
+# Requires in .env:
+#   CLOUDFLARE_TUNNEL_TOKEN=<token from the Zero Trust dashboard>
+#   PUBLIC_WS_BASE_URL=https://deepwiki.<your-domain>   # so the chat WebSocket routes back through the tunnel
+services:
+  caddy:
+    image: caddy:2
+    container_name: deepwiki-caddy
+    restart: unless-stopped
+    depends_on:
+      - deepwiki
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: deepwiki-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - caddy

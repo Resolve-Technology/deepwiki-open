@@ -1,0 +1,24 @@
+{
+	# Cloudflare terminates TLS at the edge; Caddy serves plain HTTP to cloudflared.
+	auto_https off
+	admin off
+}
+
+# Template for the reverse proxy in front of deepwiki (see docker-compose.tunnel.yml).
+# Copy this to `Caddyfile` (gitignored) and fill in the basic-auth credential:
+#   docker run --rm --entrypoint caddy caddy:2 hash-password --plaintext 'YOUR_STRONG_PASSWORD'
+# then paste the username + the printed bcrypt hash below. The hash is inlined
+# (read directly from the file by Caddy) so the `$` characters are not subject to
+# any shell/compose interpolation.
+:80 {
+	basic_auth {
+		CHANGE_ME_USERNAME CHANGE_ME_BCRYPT_HASH
+	}
+
+	# Chat WebSocket -> API server (Caddy proxies WebSocket upgrades transparently).
+	@ws path /ws/*
+	reverse_proxy @ws deepwiki:8001
+
+	# Everything else -> Next.js frontend (which proxies /api/* to the API server-side).
+	reverse_proxy deepwiki:3000
+}
