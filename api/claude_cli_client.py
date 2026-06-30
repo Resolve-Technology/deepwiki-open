@@ -10,8 +10,16 @@ import asyncio
 import json
 import logging
 import os
+import re
 
 log = logging.getLogger(__name__)
+
+# The shared prompt envelope (api/prompt_assembly.py) prepends the vLLM "/no_think"
+# directive, which Claude's SDK ignores as plain text. But `claude -p` parses a
+# leading "/no_think" as a slash command and answers "Unknown command: /no_think"
+# with zero model output — so strip it for the CLI path. Anchored to the start so
+# only a leading directive is removed, never "/no_think" appearing inside content.
+_LEADING_NO_THINK = re.compile(r"^\s*/no_think\b[ \t]*")
 
 # Path to the claude binary. In the container this points at the mounted native
 # binary (see docker-compose.yml); the default suits a host with claude on PATH.
@@ -31,6 +39,7 @@ async def run_claude_cli(model: str, prompt: str, *,
     The CLI exits 0 even on API errors and signals them inside the JSON, so we
     inspect ``is_error`` / ``subtype`` rather than trusting the exit code alone.
     """
+    prompt = _LEADING_NO_THINK.sub("", prompt, count=1)
     cmd = [
         CLAUDE_CLI_BIN, "-p",
         "--model", model,

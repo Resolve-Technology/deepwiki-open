@@ -72,6 +72,21 @@ def test_prompt_goes_to_stdin_and_argv_has_isolation_flags(fake_exec):
     assert cmd[cmd.index("--tools") + 1] == ""
 
 
+def test_strips_leading_no_think_directive(fake_exec):
+    # claude -p treats a leading "/no_think" as a slash command; it must be
+    # stripped so the CLI sees the real prompt (see api/prompt_assembly.py).
+    fake_exec["proc"] = FakeProc(stdout=_ok_payload())
+    run(run_claude_cli("claude-sonnet-4-6", "/no_think You are an analyst.\n\n<query>x</query>"))
+    assert fake_exec["proc"].stdin_written == b"You are an analyst.\n\n<query>x</query>"
+
+
+def test_does_not_strip_no_think_mid_prompt(fake_exec):
+    # Only a leading directive is removed; "/no_think" inside content is kept.
+    fake_exec["proc"] = FakeProc(stdout=_ok_payload())
+    run(run_claude_cli("claude-sonnet-4-6", "Explain the /no_think directive."))
+    assert fake_exec["proc"].stdin_written == b"Explain the /no_think directive."
+
+
 def test_custom_bin_via_env(monkeypatch, fake_exec):
     monkeypatch.setattr(cli, "CLAUDE_CLI_BIN", "/opt/claude-cli/versions/2.1.196")
     fake_exec["proc"] = FakeProc(stdout=_ok_payload())
