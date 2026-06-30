@@ -391,7 +391,7 @@ Expected: FAIL — `assert 'claude_cli' in configs["providers"]` fails (KeyError
 
 - [ ] **Step 3: Add the provider entry**
 
-In `api/config/generator.json`, inside the `"providers"` object, add this entry immediately after the closing brace of the existing `"claude": { ... }` block (and before `"ollama"`). Add a comma after the `claude` block's closing brace:
+In `api/config/generator.json`, the `"claude"` block already ends with `},` (it has a trailing comma because `"ollama"` follows it). Insert this entry **between** the end of the `claude` block and the start of the `"ollama"` block — i.e. right after the `claude` block's closing `},`. The snippet below itself ends with `},`, so the result stays valid; do NOT add any extra comma:
 
 ```json
     "claude_cli": {
@@ -448,17 +448,17 @@ In `docker-compose.yml`, extend the `volumes:` list (currently lines 19-21) to:
     volumes:
       - ~/.adalflow:/root/.adalflow      # Persist repository and embedding data
       - ./api/logs:/app/api/logs          # Persist log files across container restarts
-      - ~/.local/share/claude:/opt/claude-cli:ro   # claude CLI native binary (read-only)
-      - ~/.claude:/root/.claude                     # Claude Code subscription creds (RW: OAuth token refresh + history writes)
+      - ~/.local/bin/claude:/usr/local/bin/claude:ro   # claude CLI; Docker resolves the host symlink to the current version at mount time (re-resolves on each redeploy)
+      - ~/.claude:/root/.claude                         # Claude Code subscription creds (RW: OAuth token refresh + history writes)
 ```
 
 And add to the `environment:` list (after the `DEEPWIKI_PROMPT_TOKEN_BUDGET` line):
 
 ```yaml
-      - CLAUDE_CLI_BIN=${CLAUDE_CLI_BIN:-/opt/claude-cli/versions/2.1.196}  # mounted native binary; bump version when the host CLI updates
+      - CLAUDE_CLI_BIN=${CLAUDE_CLI_BIN:-claude}  # binary is on PATH at /usr/local/bin/claude via the volume mount
 ```
 
-> Note: the version segment (`2.1.196`) tracks the host install at `~/.local/share/claude/versions/`. If the host CLI auto-updates, update this path (or override `CLAUDE_CLI_BIN` in `.env`). Confirm the current version with `ls ~/.local/share/claude/versions/`.
+> Note: mounting the launcher symlink `~/.local/bin/claude` (rather than a pinned `versions/X` path) avoids breakage when the host CLI auto-updates daily — Docker resolves the symlink to the current binary when the container starts, and a redeploy (`docker compose up -d`) re-resolves it to whatever version is then current.
 
 - [ ] **Step 2: Validate compose syntax**
 
@@ -508,17 +508,14 @@ docker compose ps
 
 - [ ] **Step 3: HARD GATE — smoke-test `claude -p` Sonnet inside the container**
 
-Run:
+Run (prompt goes via **stdin** — `--tools` is variadic, so the prompt must NOT be a trailing positional after `--tools ""` or the CLI would swallow it as a tool name):
 ```bash
-docker compose exec deepwiki /opt/claude-cli/versions/2.1.196 -p \
-  --model claude-sonnet-4-6 --output-format json \
-  --safe-mode --strict-mcp-config --tools "" \
-  "Reply with exactly the word: pong"
+docker compose exec deepwiki sh -c 'echo "Reply with exactly the word: pong" | claude -p --model claude-sonnet-4-6 --output-format json --safe-mode --strict-mcp-config --tools ""'
 ```
 Expected: a JSON object with `"is_error": false`, `"subtype": "success"`, and `"result"` containing `pong`.
 
 - If `is_error` is `true` or `api_error_status` is `429`: **STOP**. The CLI hits the same cap as the SDK; do not proceed. Report this and revisit the approach (e.g. Haiku-only, or different auth).
-- If the binary path errors (`no such file`): run `docker compose exec deepwiki ls /opt/claude-cli/versions/` and update `CLAUDE_CLI_BIN` / the docker-compose path to the actual version, then `docker compose up -d` and retry.
+- If `claude: not found`: confirm the mount resolved — `docker compose exec deepwiki ls -la /usr/local/bin/claude` (should be the ELF, not a dangling link). If dangling, the host symlink didn't resolve; mount the real binary instead (`ls -la ~/.local/bin/claude` to find the target) and `docker compose up -d`.
 - If it errors about credentials/login: confirm `~/.claude/.credentials.json` exists on the host and the `~/.claude` mount is read-write.
 
 - [ ] **Step 4: Verify the embedder is reachable (RAG dependency)**
@@ -531,13 +528,21 @@ Expected: `embedder-ok`. If unreachable, fix `VLLM_EMBEDDER_BASE_URL` before reg
 
 - [ ] **Step 5: Submit the regeneration job**
 
-Reuses the bv401 repo info (including the private-GitLab token) from the existing Haiku cache file so the token never lands in shell history. Write `scratch_submit_bv401.py` (do NOT commit it):
+**The cached `repo.token` is `None`** (`save_wiki_cache` nulls it — `api/wiki_generator.py:333`), but bv401's deep-dive pages (`page-analysis-*`) fetch source via the GitLab API and the code **refuses to generate ungrounded pages** for remote repos without it (`api/wiki_generator.py:485-488`). So the cache supplies owner/repo/type/repoUrl, and the **GitLab PAT must come from a secret** — pass it via an env var so it stays out of the committed plan and out of shell history.
+
+The PAT is a GitLab personal access token (`glpat-...`). Export it first (paste the real value; it is NOT stored in this plan):
+```bash
+read -rs GITLAB_TOKEN && export GITLAB_TOKEN   # paste the glpat-... value, press Enter
+```
+
+Write `scratch_submit_bv401.py` (do NOT commit it):
 
 ```python
-import glob, json, urllib.request
+import glob, json, os, urllib.request
 
-cache = glob.glob("/home/ubuntu/.adalflow/wikicache/*bv401*claude-haiku*")[0]
+cache = glob.glob("/home/ubuntu/.adalflow/wikicache/*cache*bv401*claude-haiku*")[0]
 repo = json.load(open(cache))["repo"]
+token = os.environ["GITLAB_TOKEN"]  # raises if not exported
 
 payload = {
     "repo": {
@@ -545,7 +550,7 @@ payload = {
         "repo": repo["repo"],
         "type": repo["type"],
         "repoUrl": repo["repoUrl"],
-        "token": repo.get("token"),
+        "token": token,
     },
     "language": "zh-tw",
     "provider": "claude_cli",
@@ -564,7 +569,7 @@ Run:
 ```bash
 .venv/bin/python scratch_submit_bv401.py
 ```
-Expected: JSON with a job `id` and `status` `queued` (or `running`). Note the `id`.
+Expected: `{"job_id": "<hex>"}`. Note the `job_id`.
 
 > If the API port differs, confirm with `grep PORT .env` (default 8001).
 
