@@ -6,6 +6,7 @@ services:
     ports:
       - "${PORT:-8001}:${PORT:-8001}"  # API port
       - "3000:3000"  # Next.js port
+    restart: unless-stopped
     env_file:
       - .env
     environment:
@@ -15,9 +16,12 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - LOG_FILE_PATH=${LOG_FILE_PATH:-api/logs/application.log}
       - DEEPWIKI_PROMPT_TOKEN_BUDGET=${DEEPWIKI_PROMPT_TOKEN_BUDGET:-80000}  # non-Claude prompt budget (vLLM ctx 131k - completion headroom)
+      - CLAUDE_CLI_BIN=${CLAUDE_CLI_BIN:-claude}  # binary is on PATH at /usr/local/bin/claude via the volume mount
     volumes:
       - ~/.adalflow:/root/.adalflow      # Persist repository and embedding data
       - ./api/logs:/app/api/logs          # Persist log files across container restarts
+      - ~/.local/bin/claude:/usr/local/bin/claude:ro   # claude CLI; Docker resolves the host symlink to the current version at mount time (re-resolves on each redeploy)
+      - ~/.claude:/root/.claude                         # Claude Code subscription creds (RW: OAuth token refresh + history writes)
     # Resource limits for docker-compose up (not Swarm mode)
     mem_limit: 6g
     mem_reservation: 2g
