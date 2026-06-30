@@ -143,6 +143,22 @@
         }
       }
     },
+    "claude_cli": {
+      "client_class": "ClaudeClient",
+      "default_model": "claude-sonnet-4-6",
+      "supportsCustomModel": true,
+      "models": {
+        "claude-sonnet-4-6": {
+          "max_tokens": 64000
+        },
+        "claude-opus-4-8": {
+          "max_tokens": 100000
+        },
+        "claude-haiku-4-5-20251001": {
+          "max_tokens": 64000
+        }
+      }
+    },
     "ollama": {
       "default_model": "qwen3:1.7b",
       "supportsCustomModel": true,
