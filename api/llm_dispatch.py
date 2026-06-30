@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from adalflow.core.types import ModelType
 
 from api.anthropic_client import AnthropicClient
+from api.claude_cli_client import run_claude_cli
 from api.config import get_model_config
 from api.vllm_client import VLLMClient
 from api.vllm_discovery import get_vllm_models, get_vllm_route
@@ -82,5 +83,10 @@ async def generate(provider: str, model: str, prompt: str) -> LLMResult:
         return LLMResult("".join(text),
                          getattr(u, "prompt_tokens", 0) or 0,
                          getattr(u, "completion_tokens", 0) or 0)
+
+    if provider == "claude_cli":
+        logger.info(f"Dispatching to Claude via CLI (claude -p) model: {model}")
+        text, in_tok, out_tok = await run_claude_cli(model, prompt)
+        return LLMResult(text, in_tok, out_tok)
 
     raise ValueError(f"Server-side generation does not support provider {provider!r} yet")

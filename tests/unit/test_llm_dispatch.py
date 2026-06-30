@@ -147,3 +147,31 @@ def test_vllm_route_found_after_refresh(monkeypatch):
 def test_unsupported_provider():
     with pytest.raises(ValueError, match="does not support provider 'google'"):
         run(generate("google", "gemini", "P"))
+
+
+def test_claude_cli_branch(monkeypatch):
+    calls = {}
+
+    async def fake_run(model, prompt, **kwargs):
+        calls["model"] = model
+        calls["prompt"] = prompt
+        return ("# Generated\nbody", 77, 88)
+
+    monkeypatch.setattr(llm_dispatch, "run_claude_cli", fake_run)
+
+    result = run(generate("claude_cli", "claude-sonnet-4-6", "PROMPT"))
+
+    assert result == LLMResult("# Generated\nbody", 77, 88)
+    assert calls == {"model": "claude-sonnet-4-6", "prompt": "PROMPT"}
+
+
+def test_claude_cli_branch_propagates_errors(monkeypatch):
+    from api.claude_cli_client import ClaudeCLIError
+
+    async def fake_run(model, prompt, **kwargs):
+        raise ClaudeCLIError("claude -p reported error: subtype=error status=429")
+
+    monkeypatch.setattr(llm_dispatch, "run_claude_cli", fake_run)
+
+    with pytest.raises(ClaudeCLIError, match="status=429"):
+        run(generate("claude_cli", "claude-sonnet-4-6", "P"))
