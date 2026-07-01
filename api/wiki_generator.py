@@ -464,7 +464,8 @@ async def run_generation(
             page_inner = build_page_prompt(
                 page["title"], page["filePaths"], job.language, is_deep_dive,
                 repo_url, repo.type, default_branch,
-                required_outline=TSD_BRD_OUTLINES.get(page["id"]))
+                required_outline=TSD_BRD_OUTLINES.get(page["id"]),
+                omit_general_intro=page["id"].startswith("page-tsd-"))
             # Deep-dive pages get the full program source injected — the same
             # provider-API fetch the websocket does for request.filePath (it
             # raises for local repos; proceed without injection, like today).
