@@ -238,7 +238,9 @@ def test_parse_generated_headings_bodies_and_anchors():
     assert anchors == [
         (1, "title"), (2, "systemplatform"), (3, "network"), (2, "systeminterface")]
     body = {h["anchor"]: h["body"] for h in heads}
-    assert body["systemplatform"] == "DB2/400 on AS400."   # stops before ### Network
+    # An H2 body absorbs its nested H3 block (body runs to the next heading of
+    # level <= its own) — so container sections aren't mislabeled empty later.
+    assert body["systemplatform"] == "DB2/400 on AS400.\n### 網路 (Network)\nNone"
     assert body["network"] == "None"
     assert body["systeminterface"] == "Inbound only."
 
@@ -392,9 +394,12 @@ def classify_page(page_id: str, content: str, outline: str) -> dict:
             entry["status"] = "empty_none" if _is_none_body(gh["body"]) else "content"
         if (page_id, req["label"]) in ENUMERATED_SECTIONS:
             body_norm = _normalize(gh["body"]) if gh else ""
+            # Guard against an empty-normalized label (e.g. a future CJK-only
+            # row) matching everything via "" in body_norm.
             entry["rows"] = [
                 {"label": r,
-                 "status": "present" if _normalize(r) in body_norm else "missing"}
+                 "status": "present" if _normalize(r) and _normalize(r) in body_norm
+                           else "missing"}
                 for r in parse_required_rows(outline, req["label"])]
         headings.append(entry)
     return {"id": page_id, "present": True, "headings": headings}
@@ -626,9 +631,16 @@ git commit -m "feat: TSD/BRD completeness — markdown renderer + report paths"
 **Interfaces:**
 - Consumes: `check_tsd_brd_completeness`, `render_markdown_report`, `completeness_report_paths` (Tasks 5-6); existing `get_wiki_cache_path` (already imported in wiki_generator from `api.api`), `generated` (dict pid→page), `repo`, `job`.
 
-- [ ] **Step 1: Add the import**
+- [ ] **Step 1: Add the imports**
 
-In `api/wiki_generator.py`, add after the existing `from api.citation_grounding import (...)` import block:
+`api/wiki_generator.py` does NOT currently import `json` or `datetime` (its top imports are asyncio/logging/os/re/time/xml). Add both to the stdlib import block at the top of the file:
+
+```python
+import json
+from datetime import datetime, timezone
+```
+
+Then add, after the existing `from api.citation_grounding import (...)` import block:
 
 ```python
 from api.tsd_brd_completeness import (check_tsd_brd_completeness,
@@ -659,7 +671,9 @@ with:
     try:
         report = check_tsd_brd_completeness(list(generated.values()))
         report = {"repo": f"{repo.owner}/{repo.repo}", "provider": job.provider,
-                  "model": job.model, **report}
+                  "model": job.model,
+                  "generated_at": datetime.now(timezone.utc).isoformat(),
+                  **report}
         cache_path = get_wiki_cache_path(repo.owner, repo.repo, repo.type,
                                          job.language, job.provider, job.model)
         json_path, md_path = completeness_report_paths(cache_path)
@@ -680,10 +694,10 @@ with:
     notify()
 ```
 
-- [ ] **Step 3: Verify `json` is imported in wiki_generator.py**
+- [ ] **Step 3: Confirm the new imports are present**
 
-Run: `grep -n "^import json" api/wiki_generator.py`
-Expected: a match. If absent, add `import json` with the other stdlib imports at the top of the file.
+Run: `grep -nE "^import json|^from datetime import|tsd_brd_completeness" api/wiki_generator.py`
+Expected: `import json`, `from datetime import datetime, timezone`, and the `tsd_brd_completeness` import all present.
 
 - [ ] **Step 4: Full test suite + import sanity**
 
