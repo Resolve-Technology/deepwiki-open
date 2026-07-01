@@ -170,3 +170,40 @@ def test_render_markdown_report_marks_statuses():
     assert "✗ Gamma" in md
     assert "✗ Existing reports" in md
     assert "page-b" in md  # missing page listed
+
+
+from api.tsd_brd_completeness import _document_of
+
+
+def test_document_of_classifies_by_prefix():
+    assert _document_of("page-tsd-scope") == "TSD"
+    assert _document_of("page-brd-reference") == "BRD"
+    assert _document_of("page-wiki-overview") is None
+
+
+def test_by_document_buckets_tsd_and_brd_independently():
+    outlines = {
+        "page-tsd-a": "## Alpha\n## Beta\n",
+        "page-brd-b": "## Gamma\n",
+    }
+    pages = [
+        {"id": "page-tsd-a", "title": "A",
+         "content": "## a (Alpha)\nreal\n## b (Beta)\nNone\n"},
+        # page-brd-b absent -> its heading counts missing under BRD
+    ]
+    rep = check_tsd_brd_completeness(pages, outlines)
+    bd = rep["summary"]["by_document"]
+    assert bd["TSD"]["headings"] == {"content": 1, "empty_none": 1, "missing": 0}
+    assert bd["BRD"]["headings"] == {"content": 0, "empty_none": 0, "missing": 1}
+    # grand totals still equal the sum of both documents
+    assert rep["summary"]["headings"] == {"content": 1, "empty_none": 1, "missing": 1}
+
+
+def test_by_document_buckets_rows_under_tsd():
+    outlines = {"page-tsd-system-overview":
+                "## Impact Analysis\n- Existing applications\n- Existing reports\n"}
+    pages = [{"id": "page-tsd-system-overview", "title": "SO",
+              "content": "## x (Impact Analysis)\n| Existing applications | None | |\n"}]
+    rep = check_tsd_brd_completeness(pages, outlines)
+    assert rep["summary"]["by_document"]["TSD"]["rows"] == {"present": 1, "missing": 1}
+    assert rep["summary"]["by_document"]["BRD"]["rows"] == {"present": 0, "missing": 0}

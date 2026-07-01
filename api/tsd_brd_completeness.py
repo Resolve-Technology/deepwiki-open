@@ -129,14 +129,30 @@ def classify_page(page_id: str, content: str, outline: str) -> dict:
     return {"id": page_id, "present": True, "headings": headings}
 
 
+def _document_of(page_id: str) -> "str | None":
+    """Which template document a page id belongs to."""
+    if page_id.startswith("page-tsd-"):
+        return "TSD"
+    if page_id.startswith("page-brd-"):
+        return "BRD"
+    return None
+
+
 def check_tsd_brd_completeness(pages: list, outlines: dict = TSD_BRD_OUTLINES) -> dict:
     """Build the completeness report over the template TSD/BRD pages."""
     by_id = {p.get("id"): p for p in (pages or [])}
     headings_count = {"content": 0, "empty_none": 0, "missing": 0}
     rows_count = {"present": 0, "missing": 0}
+    by_document = {
+        "TSD": {"headings": {"content": 0, "empty_none": 0, "missing": 0},
+                "rows": {"present": 0, "missing": 0}},
+        "BRD": {"headings": {"content": 0, "empty_none": 0, "missing": 0},
+                "rows": {"present": 0, "missing": 0}},
+    }
     pages_missing, page_reports = [], []
 
     for pid, outline in outlines.items():
+        doc = _document_of(pid)
         page = by_id.get(pid)
         if page is None:
             pages_missing.append(pid)
@@ -146,17 +162,23 @@ def check_tsd_brd_completeness(pages: list, outlines: dict = TSD_BRD_OUTLINES) -
                 "headings": [{"label": r["label"], "level": r["level"],
                               "status": "missing"} for r in reqs]})
             headings_count["missing"] += len(reqs)
+            if doc:
+                by_document[doc]["headings"]["missing"] += len(reqs)
             continue
         report = classify_page(pid, page.get("content") or "", outline)
         report["title"] = page.get("title")
         page_reports.append(report)
         for h in report["headings"]:
             headings_count[h["status"]] += 1
+            if doc:
+                by_document[doc]["headings"][h["status"]] += 1
             for row in h.get("rows", []):
                 rows_count[row["status"]] += 1
+                if doc:
+                    by_document[doc]["rows"][row["status"]] += 1
 
     return {"summary": {"headings": headings_count, "rows": rows_count,
-                        "pages_missing": pages_missing},
+                        "pages_missing": pages_missing, "by_document": by_document},
             "pages": page_reports}
 
 
