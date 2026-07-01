@@ -11,6 +11,7 @@ from api.wiki_prompts import (
     language_clause,
     generate_file_url,
     parse_revised_content,
+    TSD_BRD_OUTLINES,
 )
 
 
@@ -319,3 +320,14 @@ def test_build_citation_fix_prompt_lists_every_broken_citation():
     assert "lines not in provided source" in prompt
     assert content in prompt
     assert "My Page" in prompt
+
+
+def test_outline_clause_requires_bilingual_table_rows():
+    prompt = build_page_prompt(
+        "系統概觀 (System Overview)", ["BV401.txt"], "zh-tw", False,
+        "https://x/repo", "gitlab", "main",
+        required_outline=TSD_BRD_OUTLINES["page-tsd-system-overview"])
+    # the clause must instruct that required TABLE ROWS also carry the English
+    # label in parentheses, like headings
+    assert "table row" in prompt.lower()
+    assert "in parentheses" in prompt.lower()

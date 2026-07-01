@@ -219,3 +219,14 @@ def test_by_document_buckets_rows_under_tsd():
     rep = check_tsd_brd_completeness(pages, outlines)
     assert rep["summary"]["by_document"]["TSD"]["rows"] == {"present": 1, "missing": 1}
     assert rep["summary"]["by_document"]["BRD"]["rows"] == {"present": 0, "missing": 0}
+
+
+def test_bilingual_row_cell_is_matched_present():
+    # A row cell written as "<translation> (English)" must match the English label.
+    outline = ("## Impact Analysis\n- Existing applications\n")
+    content = ("## 影響分析 (Impact Analysis)\n"
+               "| 項目 | Impact |\n|---|---|\n"
+               "| 現有應用程式 (Existing applications) | None |\n")
+    page = classify_page("page-tsd-system-overview", content, outline)
+    rows = {r["label"]: r["status"] for r in page["headings"][0]["rows"]}
+    assert rows == {"Existing applications": "present"}
