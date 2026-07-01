@@ -7,7 +7,7 @@ const TARGET_SERVER_BASE_URL = process.env.SERVER_BASE_URL || 'http://localhost:
 export async function GET(request: NextRequest) {
   try {
     const qs = request.nextUrl.searchParams.toString();
-    const backendResponse = await fetch(`${TARGET_SERVER_BASE_URL}/wiki_completeness?${qs}`);
+    const backendResponse = await fetch(`${TARGET_SERVER_BASE_URL}/api/wiki_completeness?${qs}`);
     const contentType = backendResponse.headers.get('content-type') || 'application/json';
     const body = await backendResponse.text();
     return new NextResponse(body, {
