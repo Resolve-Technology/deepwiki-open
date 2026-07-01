@@ -466,7 +466,11 @@ async def run_generation(
                 page["title"], page["filePaths"], job.language, is_deep_dive,
                 repo_url, repo.type, default_branch,
                 required_outline=TSD_BRD_OUTLINES.get(page["id"]),
-                omit_general_intro=page["id"].startswith("page-tsd-"))
+                # TSD chapters skip the general intro (consolidated in the
+                # Introduction chapter) — but the Introduction page itself keeps
+                # it, else suppressing it there tends to drop its "Purpose".
+                omit_general_intro=(page["id"].startswith("page-tsd-")
+                                    and page["id"] != "page-tsd-introduction"))
             # Deep-dive pages get the full program source injected — the same
             # provider-API fetch the websocket does for request.filePath (it
             # raises for local repos; proceed without injection, like today).
