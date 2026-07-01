@@ -14,12 +14,14 @@ self-review always retrieves via its explicit rag_query. Do not "improve"
 this without changing the tests.
 """
 import asyncio
+import json
 import logging
 import os
 import re
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import unquote
 
@@ -32,6 +34,9 @@ from api.prompt_assembly import (assemble_envelope, fit_envelope_inputs,
 from api.citation_grounding import (build_repo_source_map, build_source_map,
                                     normalize_bare_citations,
                                     verify_page_citations)
+from api.tsd_brd_completeness import (check_tsd_brd_completeness,
+                                      completeness_report_paths,
+                                      render_markdown_report)
 from api.citation_stripping import strip_unverified_claims
 from api.rag import RAG
 from api.repo_tree import fetch_repo_tree
@@ -561,5 +566,29 @@ async def run_generation(
     progress.phase = "saving"
     notify()
     await save_partial(generated, structure)
+
+    # Best-effort TSD/BRD completeness report — diagnostic only, never fatal.
+    try:
+        report = check_tsd_brd_completeness(list(generated.values()))
+        report = {"repo": f"{repo.owner}/{repo.repo}", "provider": job.provider,
+                  "model": job.model,
+                  "generated_at": datetime.now(timezone.utc).isoformat(),
+                  **report}
+        cache_path = get_wiki_cache_path(repo.owner, repo.repo, repo.type,
+                                         job.language, job.provider, job.model)
+        json_path, md_path = completeness_report_paths(cache_path)
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(render_markdown_report(report))
+        h = report["summary"]["headings"]
+        r = report["summary"]["rows"]
+        logger.info(f"TSD/BRD completeness [{repo.repo}]: headings "
+                    f"{h['content']} ok / {h['empty_none']} None / "
+                    f"{h['missing']} MISSING; rows {r['present']}/"
+                    f"{r['present'] + r['missing']}")
+    except Exception as e:
+        logger.warning(f"TSD/BRD completeness check failed: {e}")
+
     progress.phase = "done"
     notify()
