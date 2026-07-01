@@ -742,6 +742,34 @@ async def get_cached_wiki(
         logger.info(f"Wiki cache not found for {owner}/{repo} ({repo_type}), lang: {language}")
         return None
 
+@app.get("/api/wiki_completeness")
+async def get_completeness_report(
+    owner: str = Query(..., description="Repository owner"),
+    repo: str = Query(..., description="Repository name"),
+    repo_type: str = Query(..., description="Repository type (e.g., github, gitlab)"),
+    language: str = Query(..., description="Language of the wiki content"),
+    provider: Optional[str] = Query(None, description="LLM provider of the cached version"),
+    model: Optional[str] = Query(None, description="Model of the cached version"),
+    fmt: str = Query("json", alias="format", description="json (default) or md"),
+):
+    """Serve the TSD/BRD completeness report written next to the wikicache.
+
+    format=json -> parsed report, or 200 null when absent (like get_cached_wiki).
+    format=md   -> the Markdown report as text/markdown, or 404 when absent.
+    """
+    from api.completeness_io import read_completeness_report
+    # Reuses get_wiki_cache_path's path-traversal guards (raises 400 on bad ids).
+    cache_path = get_wiki_cache_path(owner, repo, repo_type, language, provider, model)
+    result = read_completeness_report(cache_path, fmt)
+    if result is None:
+        if fmt == "md":
+            return JSONResponse(status_code=404, content={"error": "No completeness report."})
+        return None  # 200 with null body
+    content, media = result
+    if media:  # markdown
+        return Response(content=content, media_type=media)
+    return content  # dict -> FastAPI serializes as JSON
+
 @app.post("/api/wiki_cache")
 async def store_wiki_cache(request_data: WikiCacheRequest):
     """
