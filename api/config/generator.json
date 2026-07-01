@@ -148,7 +148,7 @@
       "default_model": "claude-sonnet-5",
       "supportsCustomModel": true,
       "models": {
-        "claude-sonnet-5": { "temperature": 0.3, "max_tokens": 64000 },
+        "claude-sonnet-5": { "max_tokens": 64000 },
         "claude-opus-4-8": { "max_tokens": 100000, "thinking": "adaptive" }
       }
     },
