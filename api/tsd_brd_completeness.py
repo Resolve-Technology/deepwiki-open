@@ -192,26 +192,34 @@ def completeness_report_paths(cache_path: str) -> tuple:
     return base + ".completeness.json", base + ".completeness.md"
 
 
+def _render_page(lines: list, page: dict) -> None:
+    title = page.get("title") or page["id"]
+    lines.append(f"### {title} (`{page['id']}`)")
+    if not page.get("present", True):
+        lines.append("_Page missing from generated wiki._")
+    for hd in page["headings"]:
+        indent = "  " * (hd["level"] - 2) if hd["level"] >= 2 else ""
+        lines.append(f"- {indent}{_MARK[hd['status']]} {hd['label']}")
+        for row in hd.get("rows", []):
+            lines.append(f"    - {_MARK[row['status']]} {row['label']}")
+    lines.append("")
+
+
 def render_markdown_report(report: dict) -> str:
-    """Human-readable Markdown: summary line + per-page ✓/○/✗ tables."""
-    h = report["summary"]["headings"]
-    r = report["summary"]["rows"]
-    lines = ["# TSD/BRD Completeness Report", "",
-             f"**Headings:** {h['content']} ok / {h['empty_none']} None / "
-             f"{h['missing']} MISSING",
-             f"**Rows:** {r['present']} present / {r['missing']} missing", ""]
+    """Human-readable Markdown grouped into TSD and BRD sections."""
+    bd = report["summary"]["by_document"]
+    lines = ["# TSD/BRD Completeness Report", ""]
     missing_pages = report["summary"]["pages_missing"]
     if missing_pages:
         lines += ["**Pages entirely missing:** " + ", ".join(missing_pages), ""]
-    for page in report["pages"]:
-        title = page.get("title") or page["id"]
-        lines.append(f"## {title} (`{page['id']}`)")
-        if not page.get("present", True):
-            lines.append("_Page missing from generated wiki._")
-        for hd in page["headings"]:
-            indent = "  " * (hd["level"] - 2) if hd["level"] >= 2 else ""
-            lines.append(f"- {indent}{_MARK[hd['status']]} {hd['label']}")
-            for row in hd.get("rows", []):
-                lines.append(f"    - {_MARK[row['status']]} {row['label']}")
+    for doc in ("TSD", "BRD"):
+        h = bd[doc]["headings"]
+        r = bd[doc]["rows"]
+        lines.append(f"## {doc} — {h['content']} ok / {h['empty_none']} None / "
+                     f"{h['missing']} MISSING (rows {r['present']}/"
+                     f"{r['present'] + r['missing']})")
         lines.append("")
+        for page in report["pages"]:
+            if _document_of(page["id"]) == doc:
+                _render_page(lines, page)
     return "\n".join(lines)
