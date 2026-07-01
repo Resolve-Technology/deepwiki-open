@@ -34,9 +34,10 @@ from api.prompt_assembly import (assemble_envelope, fit_envelope_inputs,
 from api.citation_grounding import (build_repo_source_map, build_source_map,
                                     normalize_bare_citations,
                                     verify_page_citations)
-from api.tsd_brd_completeness import (check_tsd_brd_completeness,
+from api.tsd_brd_completeness import (build_report_payload,
                                       completeness_report_paths,
                                       render_markdown_report)
+from api.completeness_io import atomic_write_text
 from api.citation_stripping import strip_unverified_claims
 from api.rag import RAG
 from api.repo_tree import fetch_repo_tree
@@ -570,18 +571,14 @@ async def run_generation(
 
     # Best-effort TSD/BRD completeness report — diagnostic only, never fatal.
     try:
-        report = check_tsd_brd_completeness(list(generated.values()))
-        report = {"repo": f"{repo.owner}/{repo.repo}", "provider": job.provider,
-                  "model": job.model,
-                  "generated_at": datetime.now(timezone.utc).isoformat(),
-                  **report}
+        report = build_report_payload(
+            list(generated.values()), f"{repo.owner}/{repo.repo}",
+            job.provider, job.model, datetime.now(timezone.utc).isoformat())
         cache_path = get_wiki_cache_path(repo.owner, repo.repo, repo.type,
                                          job.language, job.provider, job.model)
         json_path, md_path = completeness_report_paths(cache_path)
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(report, f, ensure_ascii=False, indent=2)
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(render_markdown_report(report))
+        atomic_write_text(json_path, json.dumps(report, ensure_ascii=False, indent=2))
+        atomic_write_text(md_path, render_markdown_report(report))
         bd = report["summary"]["by_document"]
         def _doc_summary(d: dict) -> str:
             hh, rr = d["headings"], d["rows"]
