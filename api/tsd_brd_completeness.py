@@ -13,6 +13,7 @@ _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 _TRAILING_PARENS = re.compile(r"\(([^)]*)\)\s*$")
 # Outline headings are H2/H3 only; generated pages may use H1-H6.
 _OUTLINE_H = re.compile(r"^(#{2,3})\s+(.+?)\s*$")
+_MD_H = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 
 
 def _normalize(text: str) -> str:
@@ -56,3 +57,33 @@ def parse_required_rows(outline: str, section_label: str) -> list:
         if in_section and line.strip().startswith("- "):
             rows.append(line.strip()[2:].strip())
     return rows
+
+
+def _parse_generated_headings(content: str) -> list:
+    """Headings (H1-H6) of a generated page, each with its section body.
+
+    Body = lines after the heading up to the next heading of level <= its own
+    (or end of page). Lines inside ``` code fences are not treated as headings.
+    """
+    lines = (content or "").splitlines()
+    heads, in_fence = [], False
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        m = _MD_H.match(line)
+        if m:
+            heads.append({"level": len(m.group(1)),
+                          "anchor": _anchor_from_heading(m.group(2)),
+                          "line": i})
+    for idx, h in enumerate(heads):
+        end = len(lines)
+        for nxt in heads[idx + 1:]:
+            if nxt["level"] <= h["level"]:
+                end = nxt["line"]
+                break
+        h["body"] = "\n".join(lines[h["line"] + 1:end]).strip()
+        del h["line"]
+    return heads
