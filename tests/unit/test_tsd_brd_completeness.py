@@ -246,3 +246,17 @@ def test_outline_covers_every_template_header():
     # Every intended PCALT template header must be represented in TSD_BRD_OUTLINES
     # (as an H2/H3 label or a page id). If this fails, add the missing header.
     assert uncovered_template_headers() == {}
+
+
+from api.tsd_brd_completeness import build_report_payload
+
+
+def test_build_report_payload_wraps_metadata_and_summary():
+    pages = [{"id": "page-tsd-a", "title": "A", "content": "## a (Alpha)\nreal\n"}]
+    payload = build_report_payload(pages, "poc/x", "claude", "haiku", "2026-07-01T00:00:00Z")
+    assert payload["repo"] == "poc/x"
+    assert payload["provider"] == "claude"
+    assert payload["model"] == "haiku"
+    assert payload["generated_at"] == "2026-07-01T00:00:00Z"
+    assert "summary" in payload and "pages" in payload
+    assert "by_document" in payload["summary"]

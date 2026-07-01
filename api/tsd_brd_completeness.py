@@ -258,6 +258,16 @@ def check_tsd_brd_completeness(pages: list, outlines: dict = TSD_BRD_OUTLINES) -
             "pages": page_reports}
 
 
+def build_report_payload(pages: list, repo: str, provider, model,
+                         generated_at) -> dict:
+    """Full completeness report payload (metadata + summary/pages) — the exact
+    shape written to <cache>.completeness.json, shared by the generator and the
+    read-time self-heal path."""
+    return {"repo": repo, "provider": provider, "model": model,
+            "generated_at": generated_at,
+            **check_tsd_brd_completeness(pages)}
+
+
 _MARK = {"content": "✓", "empty_none": "○", "missing": "✗",
          "present": "✓"}
 
