@@ -230,3 +230,19 @@ def test_bilingual_row_cell_is_matched_present():
     page = classify_page("page-tsd-system-overview", content, outline)
     rows = {r["label"]: r["status"] for r in page["headings"][0]["rows"]}
     assert rows == {"Existing applications": "present"}
+
+
+from api.tsd_brd_completeness import (TSD_BRD_TEMPLATE_HEADERS,
+                                      uncovered_template_headers)
+
+
+def test_template_headers_constant_has_both_documents():
+    assert set(TSD_BRD_TEMPLATE_HEADERS) == {"TSD", "BRD"}
+    assert "Impact Analysis" in TSD_BRD_TEMPLATE_HEADERS["TSD"]
+    assert "Reference" in TSD_BRD_TEMPLATE_HEADERS["BRD"]
+
+
+def test_outline_covers_every_template_header():
+    # Every intended PCALT template header must be represented in TSD_BRD_OUTLINES
+    # (as an H2/H3 label or a page id). If this fails, add the missing header.
+    assert uncovered_template_headers() == {}

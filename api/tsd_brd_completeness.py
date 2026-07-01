@@ -138,6 +138,82 @@ def _document_of(page_id: str) -> "str | None":
     return None
 
 
+# Canonical intended headers, extracted once from the PCALT TSD/BRD template
+# TOCs (PCALT_TSD_Template / PCALT_BRD_Template). Committed here so the coverage
+# guard does not depend on the untracked .docx files. Example-placeholder rows
+# (Physical file XXXXPF, Program1/2/3, FR-0001/0002) are intentionally excluded.
+TSD_BRD_TEMPLATE_HEADERS = {
+    "TSD": [
+        "Introduction", "Scope", "Assumptions", "Inclusions", "Exclusions",
+        "Constraints", "Functional Specification", "Functional Requirements",
+        "Non-Functional Requirements", "System Overview", "System Platform",
+        "Impact Analysis", "Program Flow", "Security Control",
+        "Identity and Access Management", "Log and Event Management",
+        "Encryption", "Network", "Database Security", "Application Security",
+        "General Security", "System Interface", "Database Design/Change",
+        "Table Change", "Program Change", "Schedule Change", "Appendix",
+    ],
+    "BRD": [
+        "Background", "Boundaries", "Business Requirements",
+        "Functional Requirements", "Non-Functional Requirements",
+        "Security Control", "Reference", "Scope", "Assumptions", "Constraints",
+        "Current Processing", "Requirement Specification",
+        "Business Flow Diagram", "Data Archive and Housekeeping",
+        "Performance Requirements", "Capacity Requirements",
+        "Availability Requirements", "Reliability Requirements",
+        "Usability Requirements", "Other Requirements",
+        "Identity and Access Management", "Log and Event Management",
+        "Encryption", "Network", "Database Security", "Application Security",
+        "General Security", "Definition of Terminologies", "Attachment",
+    ],
+}
+
+# A few template headers use different wording than the outline/page ids they map
+# to. Map template header -> a term the outline uses, so coverage matches.
+_AUDIT_ALIASES = {
+    "Program Change": "program inventory",
+    "Schedule Change": "schedule batch processing",
+}
+
+
+def _coverage_tokens(document: str, outlines: dict) -> set:
+    """Normalized tokens that can satisfy a template header for a document:
+    every H2/H3 label plus each page-id tail."""
+    toks = set()
+    for pid, outline in outlines.items():
+        if _document_of(pid) != document:
+            continue
+        toks.add(_normalize(pid.replace("page-tsd-", "").replace("page-brd-", "")))
+        for h in parse_required_headings(outline):
+            toks.add(_normalize(h["label"]))
+    return {t for t in toks if t}
+
+
+def uncovered_template_headers(headers: dict = TSD_BRD_TEMPLATE_HEADERS,
+                               outlines: dict = TSD_BRD_OUTLINES) -> dict:
+    """Per document, the template headers NOT represented in the outlines.
+    A header is covered when its normalized form (or its alias's) is a substring
+    of some coverage token, or vice versa. Empty dict => fully covered.
+
+    The bidirectional substring match is intentionally lenient so template
+    wording like "Table Change" matches the outline's "Table Changes" and
+    page-id tails ("functionalspec" ⊂ "functionalspecification") count. This
+    trades some strictness for tolerance of minor wording drift; it is verified
+    to return {} against the current outlines. If a future edit needs a tighter
+    guard, switch to exact-match + an expanded alias table."""
+    out = {}
+    for doc, hs in headers.items():
+        toks = _coverage_tokens(doc, outlines)
+        missing = []
+        for h in hs:
+            cand = _normalize(_AUDIT_ALIASES.get(h, h))
+            if not any(cand in t or t in cand for t in toks):
+                missing.append(h)
+        if missing:
+            out[doc] = missing
+    return out
+
+
 def check_tsd_brd_completeness(pages: list, outlines: dict = TSD_BRD_OUTLINES) -> dict:
     """Build the completeness report over the template TSD/BRD pages."""
     by_id = {p.get("id"): p for p in (pages or [])}
