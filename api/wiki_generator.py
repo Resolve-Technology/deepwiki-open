@@ -38,7 +38,7 @@ from api.repo_tree import fetch_repo_tree
 from api.wiki_prompts import (build_citation_fix_prompt, build_page_prompt,
                               build_page_rag_query, build_self_review_prompt,
                               build_structure_prompt, get_clone_default_branch,
-                              parse_revised_content)
+                              parse_revised_content, TSD_BRD_OUTLINES)
 
 logger = logging.getLogger(__name__)
 
@@ -458,7 +458,8 @@ async def run_generation(
         try:
             page_inner = build_page_prompt(
                 page["title"], page["filePaths"], job.language, is_deep_dive,
-                repo_url, repo.type, default_branch)
+                repo_url, repo.type, default_branch,
+                required_outline=TSD_BRD_OUTLINES.get(page["id"]))
             # Deep-dive pages get the full program source injected — the same
             # provider-API fetch the websocket does for request.filePath (it
             # raises for local repos; proceed without injection, like today).

@@ -114,7 +114,7 @@ def build_structure_prompt(file_tree: str, readme: str, owner: str, repo: str,
             "- Introduction (purpose and high-level overview)\n"
             "- Scope (Assumptions; Inclusions — Inputs, Outputs, Interfaces, Online/Batch Processing, Scheduling, Error Handling, Access Restrictions; Exclusions; Constraints)\n"
             "- Functional Specification (functional and non-functional behavior — what each program does)\n"
-            "- System Overview (System Platform e.g. AS400/LifeAsia/DB2-400/OS400 if evident; Program Flow; Security Control — IAM, Logging, Encryption, Network, Database Security, Application Security; System Interface)\n"
+            "- System Overview (System Platform e.g. AS400/LifeAsia/DB2-400/OS400 if evident; Impact Analysis — a table of impact items, all \"None\" for an as-is system unless evident; Program Flow; Security Control — Identity and Access Management, Log and Event Management, Encryption, Network, Database Security, Application Security, General Security; System Interface). Keep ALL these headings even when empty (write \"None\").\n"
             "- Database Design (Physical files [PF], Logical files [LF], copybooks and their record/data structures, Table definitions)\n"
             "- Program Inventory (one page per major program/group: business function and key logic, e.g. \"CAL101\", \"GETPLONREC\")\n"
             "- Schedule / Batch Processing (batch jobs and scheduling)\n"
@@ -130,10 +130,17 @@ def build_structure_prompt(file_tree: str, readme: str, owner: str, repo: str,
             "- Security Control (IAM, Log and Event Management, Encryption, Network, Database Security, Application Security, General Security)\n"
             "- Reference (Definition of Terminologies; Attachments)\n"
             "\n"
+            "For the TSD and BRD pages above, use these EXACT page ids: page-tsd-introduction, "
+            "page-tsd-scope, page-tsd-functional-spec, page-tsd-system-overview, "
+            "page-tsd-database-design, page-tsd-program-inventory, page-tsd-batch-processing, "
+            "page-tsd-appendix, page-brd-background, page-brd-boundaries, "
+            "page-brd-business-requirements, page-brd-functional-requirements, "
+            "page-brd-non-functional-requirements, page-brd-security-control, page-brd-reference.\n"
+            "\n"
             "=== Top-level section 4: \"🔬 Program Analysis\" (per-program deep dive) ===\n"
             "EXACTLY ONE page per program source file in the repository (a program source file is any COBOL/RPG/source member — e.g. *.cbl, *.cob, *.rpg, or *.txt files whose content is program source). Rules for these pages:\n"
             "- The page id MUST follow the pattern \"page-analysis-<program-name-lowercase>\" (e.g. \"page-analysis-bv401\").\n"
-            "- The page title MUST be \"Program Deep Dive: <PROGRAM-NAME>\".\n"
+            f"- The page title MUST be the {lang_name} translation of \"Program Deep Dive: <PROGRAM-NAME>\", keeping <PROGRAM-NAME> in its original Latin form (translate only the \"Program Deep Dive\" label).\n"
             "- relevant_files MUST contain EXACTLY the one source file for that program (plus its copybook files if they exist as separate files in the repository).\n"
             "- importance MUST be \"high\".\n"
             "- Do NOT create analysis pages for non-program files (READMEs, JCL listings, data files), and do NOT merge multiple programs into one page.\n"
@@ -224,6 +231,14 @@ def build_structure_prompt(file_tree: str, readme: str, owner: str, repo: str,
         "I want to create a wiki for this repository. Determine the most logical structure for a wiki based on the repository's content.\n"
         "\n"
         f"IMPORTANT: The wiki content will be generated in {lang_name} language.\n"
+        f"IMPORTANT: Write EVERY <title> and <description> in the XML — all section titles AND all "
+        f"page titles — in {lang_name}, since they appear in the navigation menu. Do NOT leave any "
+        f"title in English. The four top-level section titles MUST keep their emoji prefix and be "
+        f"written in {lang_name}: 📘 for the developer Wiki, 📐 for the Technical Specification "
+        f"Document (TSD), 📋 for the Business Requirements Document (BRD), 🔬 for the per-program "
+        f"analysis — translate the words 'Wiki', 'Technical Specification Document', 'Business "
+        f"Requirements Document' and 'Program Analysis' into {lang_name} (you MAY keep the short "
+        f"acronym TSD/BRD in parentheses).\n"
         "\n"
         "When designing the wiki structure, include pages that would benefit from visual diagrams, such as:\n"
         "- Architecture overviews\n"
@@ -254,9 +269,145 @@ def build_structure_prompt(file_tree: str, readme: str, owner: str, repo: str,
 # Page prompts (ported from generatePageContent in page.tsx)
 # ---------------------------------------------------------------------------
 
+# Canonical sub-structure for the template-driven TSD/BRD pages. The source
+# templates (PCALT_TSD / PCALT_BRD) prescribe these headings; they MUST appear
+# even when the repository has nothing relevant (the page then states "None").
+# Keyed by the fixed page ids mandated in build_structure_prompt; a page without
+# an entry here is generated freely as before. `## ` -> H2, `### ` -> H3.
+TSD_BRD_OUTLINES = {
+    # ============================ TSD ============================
+    "page-tsd-introduction": (
+        "## Purpose\n"
+        "## Document Overview\n"
+    ),
+    "page-tsd-scope": (
+        "## Assumptions\n"
+        "## Inclusions\n"
+        "## Exclusions\n"
+        "## Constraints\n"
+    ),
+    "page-tsd-functional-spec": (
+        "## Functional Requirements\n"
+        "## Non-Functional Requirements\n"
+    ),
+    "page-tsd-system-overview": (
+        "## System Platform\n"
+        "(Operating system, hardware/midrange, database, and language/runtime evident in the "
+        "source — e.g. IBM AS/400 (iSeries), OS/400, DB2/400, LifeAsia, COBOL. None if not evident.)\n"
+        "\n"
+        "## Impact Analysis\n"
+        "Present as a Markdown table with columns: Item | Impact (H / L / None / N/A) | Remarks. "
+        "This is an EXISTING system documented as-is, so set Impact to \"None\" for every item "
+        "unless the source clearly indicates otherwise. Include one row for EACH of:\n"
+        "- Existing applications\n"
+        "- Existing batch jobs and schedulers\n"
+        "- Existing reports\n"
+        "- Existing correspondence or statements\n"
+        "- Existing system-wide parameters\n"
+        "- Existing code libraries\n"
+        "- Existing configuration files\n"
+        "- Existing utility programs and scripts\n"
+        "- Existing internal interfaces\n"
+        "- Existing external interfaces\n"
+        "- Existing data extraction, transformation or loading scripts\n"
+        "- Existing database designs\n"
+        "- Existing hardware (web servers)\n"
+        "- Existing hardware (application servers)\n"
+        "- Existing hardware (database servers)\n"
+        "- Other existing hardware (e.g. load balancers, HA)\n"
+        "- Existing network design\n"
+        "- Existing network bandwidth\n"
+        "- Existing system security policies\n"
+        "- Enterprise user access matrix\n"
+        "- Other system areas\n"
+        "- Existing transaction management module\n"
+        "\n"
+        "## Program Flow\n"
+        "(Overall program / batch control flow; include a Mermaid `graph TD` if evident. None if not evident.)\n"
+        "\n"
+        "## Security Control\n"
+        "### Identity and Access Management\n"
+        "### Log and Event Management\n"
+        "### Encryption\n"
+        "### Network\n"
+        "### Database Security\n"
+        "### Application Security\n"
+        "### General Security\n"
+        "\n"
+        "## System Interface\n"
+        "(Inbound / outbound interfaces: called/calling programs, files exchanged, external systems. None if not evident.)\n"
+    ),
+    "page-tsd-database-design": (
+        "## Physical Files (PF)\n"
+        "(One field table per physical file: field name, PIC/type, length, key, description.)\n"
+        "## Logical Files (LF)\n"
+        "(Each logical file: based-on physical file, key fields, access path.)\n"
+        "## Table Changes\n"
+    ),
+    "page-tsd-program-inventory": (
+        "## Program Inventory\n"
+        "(One ### subsection per program/module: business function and key logic. "
+        "May also summarise as a table: Program | Business Function | Key Logic.)\n"
+    ),
+    "page-tsd-batch-processing": (
+        "## Schedule / Batch Processing\n"
+        "(Batch jobs, scheduling, run frequency, dependencies and trigger conditions. None if not evident.)\n"
+    ),
+    "page-tsd-appendix": (
+        "## Appendix\n"
+    ),
+    # ============================ BRD ============================
+    "page-brd-background": (
+        "## Background\n"
+    ),
+    "page-brd-boundaries": (
+        "## Scope\n"
+        "### Inclusions\n"
+        "### Exclusions\n"
+        "## Assumptions\n"
+        "## Constraints\n"
+    ),
+    "page-brd-business-requirements": (
+        "## Current Processing\n"
+        "## Requirement Specification\n"
+        "(List as BR# items: BR-0001, BR-0002, ...)\n"
+        "## Business Flow Diagram\n"
+        "(Mermaid graph TD of the business flow. None if not evident.)\n"
+        "## Data Archive and Housekeeping\n"
+    ),
+    "page-brd-functional-requirements": (
+        "## Functional Requirements\n"
+        "(Present as a table with columns: BR ID | FR ID | Functional Requirement Description. "
+        "Each FR# is mapped to a BR#. None if not evident.)\n"
+    ),
+    "page-brd-non-functional-requirements": (
+        "## Performance Requirements\n"
+        "## Capacity Requirements\n"
+        "## Availability Requirements\n"
+        "## Reliability Requirements\n"
+        "## Usability Requirements\n"
+        "## Other Requirements\n"
+    ),
+    "page-brd-security-control": (
+        "## Identity and Access Management\n"
+        "## Log and Event Management\n"
+        "## Encryption\n"
+        "## Network\n"
+        "## Database Security\n"
+        "## Application Security\n"
+        "## General Security\n"
+    ),
+    "page-brd-reference": (
+        "## Definition of Terminologies\n"
+        "## Attachment\n"
+    ),
+}
+
+
 def build_page_prompt(page_title: str, file_paths: List[str], language: str,
                       deep_dive: bool, repo_url: str, repo_type: str,
-                      default_branch: str) -> str:
+                      default_branch: str,
+                      required_outline: Optional[str] = None) -> str:
     """Build the standard or deep-dive page generation prompt.
 
     file_paths are linked via generate_file_url so the <details> block
@@ -309,6 +460,30 @@ def build_page_prompt(page_title: str, file_paths: List[str], language: str,
         if many_files else
         "    *   IMPORTANT: Cite the provided source files extensively throughout the wiki page — every section must trace back to them. Do NOT refuse, apologize, or truncate the page because fewer than 5 files were provided; write the complete page from the files given.\n"
     )
+
+    # When this page maps to a fixed document-template section, force its exact
+    # heading structure and keep empty headings (filled with "None") rather than
+    # letting the model drop them.
+    outline_clause = ""
+    if required_outline:
+        outline_clause = (
+            "REQUIRED TEMPLATE OUTLINE — this page follows a fixed document template.\n"
+            "Reproduce EVERY heading in the [TEMPLATE] block below, in the SAME order and nesting "
+            "(`## ` = H2, `### ` = H3). For each heading, write the heading text as the "
+            f"{lang_name} translation FOLLOWED BY the exact English template wording in parentheses, "
+            "e.g. `## 可用性需求 (Availability Requirements)` and `## 可靠性需求 (Reliability "
+            "Requirements)` — this keeps every heading distinct and exactly matching the template. "
+            "This documents the EXISTING system as-is (not a change request): you MUST output every "
+            "heading even when the source files provide nothing for it — in that case keep the "
+            "heading and write exactly \"None\" as its body. A reviewer will check that EVERY "
+            "heading below is present, so do NOT drop, merge, rename, reorder, or skip any heading, "
+            "even empty or seemingly duplicate ones. You MAY add extra detail or sub-headings under "
+            "them where the source supports it.\n"
+            "[TEMPLATE]\n"
+            + required_outline.strip() + "\n"
+            "[/TEMPLATE]\n"
+            "\n"
+        )
 
     if deep_dive:
         return (
@@ -431,6 +606,7 @@ def build_page_prompt(page_title: str, file_paths: List[str], language: str,
             "\n"
             f"Immediately after the `<details>` block, the main title of the page should be a H1 Markdown heading: `# {page_title}`.\n"
             "\n"
+            + outline_clause +
             "Based ONLY on the content of the `[RELEVANT_SOURCE_FILES]`:\n"
             "\n"
             f"1.  **Introduction:** Start with a concise introduction (1-2 paragraphs) explaining the purpose, scope, and high-level overview of \"{page_title}\" within the context of the overall project. If relevant, and if information is available in the provided files, link to other potential wiki pages using the format `[Link Text](#page-anchor-or-id)`.\n"
