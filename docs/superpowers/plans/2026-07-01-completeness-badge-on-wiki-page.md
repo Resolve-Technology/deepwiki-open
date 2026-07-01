@@ -27,6 +27,33 @@
 - Consumes: `CompletenessSummary`, `completenessQuery`, `CompletenessReport` from `./CompletenessSummary`.
 - Produces: `WikiCompletenessBadge: React.FC<{ repoInfo: { owner: string; repo: string; type: string }; language: string; provider: string; model: string }>`.
 
+- [ ] **Step 0: Write the guard test (the one branch renderable without effects)**
+
+`renderToStaticMarkup` does not run `useEffect`, so only the synchronous
+empty-provider/model guard is testable this way. Create
+`src/components/WikiCompletenessBadge.test.tsx`:
+
+```tsx
+import { describe, it, expect } from 'vitest';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { WikiCompletenessBadge } from './WikiCompletenessBadge';
+
+const repoInfo = { owner: 'poc', repo: 'code1_cbl_bv401', type: 'gitlab' };
+
+describe('WikiCompletenessBadge', () => {
+  it('renders nothing when provider/model are empty', () => {
+    const html = renderToStaticMarkup(
+      React.createElement(WikiCompletenessBadge,
+        { repoInfo, language: 'zh-tw', provider: '', model: '' }));
+    expect(html).toBe('');
+  });
+});
+```
+
+Run: `docker run --rm -v "$PWD":/app -w /app node:20-slim sh -c "npx vitest run src/components/WikiCompletenessBadge.test.tsx"`
+Expected: FAIL — cannot resolve `./WikiCompletenessBadge`.
+
 - [ ] **Step 1: Create the component**
 
 Create `src/components/WikiCompletenessBadge.tsx`:
@@ -53,7 +80,8 @@ export const WikiCompletenessBadge: React.FC<{
     : '';
 
   useEffect(() => {
-    if (!query) { setReport(null); return; }
+    setReport(null);   // clear any stale report immediately on any query change
+    if (!query) return;
     let cancelled = false;
     (async () => {
       try {
@@ -131,13 +159,13 @@ Insert the badge between the closing `)}` of the meta paragraph and the `<div cl
 Run: `docker run --rm -v "$PWD":/app -w /app node:20-slim sh -c "npx tsc --noEmit -p tsconfig.json 2>&1 | grep -E 'WikiCompletenessBadge|page.tsx|CompletenessSummary|error TS' | head"`
 Expected: no errors referencing `WikiCompletenessBadge.tsx` or the wiki `page.tsx` (pre-existing unrelated TS errors elsewhere are out of scope — confirm none mention these two files).
 
-Run: `docker run --rm -v "$PWD":/app -w /app node:20-slim sh -c "npx vitest run src/components/CompletenessSummary.test.tsx"`
-Expected: PASS (the reused component is unchanged — this confirms the badge's import didn't break its exports).
+Run: `docker run --rm -v "$PWD":/app -w /app node:20-slim sh -c "npx vitest run src/components/WikiCompletenessBadge.test.tsx src/components/CompletenessSummary.test.tsx"`
+Expected: PASS (the badge's guard test now passes; the reused `CompletenessSummary` tests confirm the badge's import didn't break its exports).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/components/WikiCompletenessBadge.tsx "src/app/[owner]/[repo]/page.tsx"
+git add src/components/WikiCompletenessBadge.tsx src/components/WikiCompletenessBadge.test.tsx "src/app/[owner]/[repo]/page.tsx"
 git commit -m "feat: show completeness badge on the wiki page"
 ```
 
