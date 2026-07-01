@@ -164,30 +164,38 @@ git commit -m "feat: per-document (TSD/BRD) breakdown in completeness summary"
 ```python
 # append to tests/unit/test_tsd_brd_completeness.py
 def test_render_markdown_groups_by_document():
+    # Fixture exercises all three heading marks (✓/○/✗) AND nested row marks
+    # (✓/✗), so it fully replaces the old flat-format renderer test.
     report = {
         "summary": {
-            "headings": {"content": 2, "empty_none": 0, "missing": 1},
-            "rows": {"present": 0, "missing": 0}, "pages_missing": ["page-brd-b"],
+            "headings": {"content": 1, "empty_none": 1, "missing": 1},
+            "rows": {"present": 1, "missing": 1}, "pages_missing": ["page-brd-b"],
             "by_document": {
-                "TSD": {"headings": {"content": 2, "empty_none": 0, "missing": 0},
-                        "rows": {"present": 0, "missing": 0}},
+                "TSD": {"headings": {"content": 1, "empty_none": 1, "missing": 0},
+                        "rows": {"present": 1, "missing": 1}},
                 "BRD": {"headings": {"content": 0, "empty_none": 0, "missing": 1},
                         "rows": {"present": 0, "missing": 0}}}},
         "pages": [
             {"id": "page-tsd-a", "title": "A", "present": True, "headings": [
-                {"label": "Alpha", "level": 2, "status": "content"},
-                {"label": "Beta", "level": 2, "status": "content"}]},
+                {"label": "Alpha", "level": 2, "status": "content", "rows": [
+                    {"label": "Existing applications", "status": "present"},
+                    {"label": "Existing reports", "status": "missing"}]},
+                {"label": "Beta", "level": 2, "status": "empty_none"}]},
             {"id": "page-brd-b", "title": None, "present": False, "headings": [
                 {"label": "Gamma", "level": 2, "status": "missing"}]}]}
     md = render_markdown_report(report)
     assert "## TSD" in md
     assert "## BRD" in md
     # each document header carries its own summary line
-    assert "2 ok / 0 None / 0 MISSING" in md   # TSD
-    assert "0 ok / 0 None / 1 MISSING" in md    # BRD
+    assert "1 ok / 1 None / 0 MISSING (rows 1/2)" in md   # TSD
+    assert "0 ok / 0 None / 1 MISSING (rows 0/0)" in md    # BRD
     # TSD section appears before BRD, and page A renders under TSD
     assert md.index("## TSD") < md.index("### A") < md.index("## BRD")
-    assert "✗ Gamma" in md
+    assert "✓ Alpha" in md          # content mark
+    assert "○ Beta" in md           # empty_none mark
+    assert "✗ Gamma" in md          # missing mark
+    assert "✓ Existing applications" in md   # nested row present
+    assert "✗ Existing reports" in md        # nested row missing
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -416,7 +424,8 @@ Expected: FAIL — `ImportError: cannot import name 'TSD_BRD_TEMPLATE_HEADERS'`
 
 - [ ] **Step 3: Write minimal implementation**
 
-Add near the top of `api/tsd_brd_completeness.py` (after the imports / `_document_of`):
+Add these definitions in `api/tsd_brd_completeness.py` immediately before
+`check_tsd_brd_completeness` (after `_document_of` from Task 1):
 
 ```python
 # Canonical intended headers, extracted once from the PCALT TSD/BRD template
@@ -474,7 +483,14 @@ def uncovered_template_headers(headers: dict = TSD_BRD_TEMPLATE_HEADERS,
                                outlines: dict = TSD_BRD_OUTLINES) -> dict:
     """Per document, the template headers NOT represented in the outlines.
     A header is covered when its normalized form (or its alias's) is a substring
-    of some coverage token, or vice versa. Empty dict => fully covered."""
+    of some coverage token, or vice versa. Empty dict => fully covered.
+
+    The bidirectional substring match is intentionally lenient so template
+    wording like "Table Change" matches the outline's "Table Changes" and
+    page-id tails ("functionalspec" ⊂ "functionalspecification") count. This
+    trades some strictness for tolerance of minor wording drift; it is verified
+    to return {} against the current outlines. If a future edit needs a tighter
+    guard, switch to exact-match + an expanded alias table."""
     out = {}
     for doc, hs in headers.items():
         toks = _coverage_tokens(doc, outlines)
@@ -614,6 +630,8 @@ export const CompletenessSummary: React.FC<{
   if (bd) {
     return (
       <div className="mt-1 text-[11px] text-[var(--muted)]">
+        {/* Only TSD has enumerated rows today (Impact Analysis is the sole
+            ENUMERATED_SECTIONS entry); showRows is passed to the TSD line only. */}
         <DocLine label="TSD" d={bd.TSD} showRows />
         <DocLine label="BRD" d={bd.BRD} />
         <div>{link}</div>

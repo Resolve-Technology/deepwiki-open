@@ -44,8 +44,10 @@ The completeness report currently presents one blended summary
 
 The authoritative intended-header list is the Table of Contents of
 `PCALT_TSD_Template -.docx` and `PCALT_BRD_Template.docx` (repo root). A `.docx`
-is a zip; `word/document.xml` holds the TOC paragraphs (styles `10`/`22` = TOC
-levels in these files). Extract the TOC header text (strip the leading section
+is a zip; `word/document.xml` holds the TOC paragraphs under TOC-level paragraph styles
+(the exact style ids differ per file — e.g. `10`/`22` in the TSD file; confirm
+by inspection when re-extracting). Extract the TOC header text (strip the
+leading section
 number, the trailing `PAGEREF …`, and the TOC field code), dedupe, and compare
 against the H2/H3 labels in `TSD_BRD_OUTLINES`.
 
