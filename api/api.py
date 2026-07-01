@@ -587,7 +587,8 @@ def list_wiki_cache_paths(owner: str, repo: str, repo_type: str, language: str) 
     legacy_path = get_wiki_cache_path(owner, repo, repo_type, language)
     base = legacy_path[:-len(".json")]
     # Base segments are restricted to [A-Za-z0-9._-], so they contain no glob metachars.
-    paths = glob.glob(f"{base}~*~*.json")
+    paths = [p for p in glob.glob(f"{base}~*~*.json")
+             if not p.endswith(".completeness.json")]  # exclude report sidecars
     if os.path.exists(legacy_path):
         paths.append(legacy_path)
     def _mtime(p: str) -> float:
@@ -624,7 +625,8 @@ def parse_wiki_cache_filename(filename: str) -> Optional[Dict[str, Optional[str]
     and versioned names (...~{provider}~{model}.json). Returns None if the
     filename is not a parseable cache file.
     """
-    if not (filename.startswith("deepwiki_cache_") and filename.endswith(".json")):
+    if (not (filename.startswith("deepwiki_cache_") and filename.endswith(".json"))
+            or filename.endswith(".completeness.json")):  # exclude report sidecars
         return None
     stem = filename[:-len(".json")]
     version_parts = stem.split('~')

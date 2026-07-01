@@ -384,3 +384,15 @@ def test_stats_roundtrip(cache_dir):
                                        provider="claude", model="claude-haiku-4-5-20251001"))
     assert data.stats["generation"]["input_tokens"] == 100
     assert data.stats["review"]["seconds"] == 25
+
+
+def test_parse_rejects_completeness_sidecar():
+    # The completeness report is written as a sibling `...json` file next to the
+    # wikicache; it must NOT be parsed as a project/version (it isn't a wiki).
+    sidecar = ("deepwiki_cache_gitlab_poc_code1_cbl_bv401_zh-tw"
+               "~claude-api~claude-sonnet-5.completeness.json")
+    assert parse_wiki_cache_filename(sidecar) is None
+    real = ("deepwiki_cache_gitlab_poc_code1_cbl_bv401_zh-tw"
+            "~claude-api~claude-sonnet-5.json")
+    parsed = parse_wiki_cache_filename(real)
+    assert parsed and parsed["model"] == "claude-sonnet-5"
