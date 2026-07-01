@@ -143,6 +143,15 @@
         }
       }
     },
+    "claude_api": {
+      "client_class": "ClaudeClient",
+      "default_model": "claude-sonnet-5",
+      "supportsCustomModel": true,
+      "models": {
+        "claude-sonnet-5": { "temperature": 0.3, "max_tokens": 64000 },
+        "claude-opus-4-8": { "max_tokens": 100000, "thinking": "adaptive" }
+      }
+    },
     "claude_cli": {
       "client_class": "ClaudeClient",
       "default_model": "claude-sonnet-4-6",
