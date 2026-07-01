@@ -87,3 +87,43 @@ def _parse_generated_headings(content: str) -> list:
         h["body"] = "\n".join(lines[h["line"] + 1:end]).strip()
         del h["line"]
     return heads
+
+
+NONE_TOKENS = {"none", "無", "無相關", "無相關資訊", "n/a", "na",
+               "not applicable", "-"}
+
+
+def _is_none_body(body: str) -> bool:
+    """True when a section body is empty or one of the none-tokens."""
+    s = (body or "").strip().strip("*_`> ").strip().rstrip(".。 ").strip()
+    if not s:
+        return True
+    return s.casefold() in {t.casefold() for t in NONE_TOKENS}
+
+
+def classify_page(page_id: str, content: str, outline: str) -> dict:
+    """Classify every required heading (and enumerated row) of one page."""
+    gen = _parse_generated_headings(content)
+    by_anchor = {}
+    for h in gen:
+        by_anchor.setdefault(h["anchor"], h)  # first match wins
+
+    headings = []
+    for req in parse_required_headings(outline):
+        gh = by_anchor.get(_normalize(req["label"]))
+        entry = {"label": req["label"], "level": req["level"]}
+        if gh is None:
+            entry["status"] = "missing"
+        else:
+            entry["status"] = "empty_none" if _is_none_body(gh["body"]) else "content"
+        if (page_id, req["label"]) in ENUMERATED_SECTIONS:
+            body_norm = _normalize(gh["body"]) if gh else ""
+            # Guard against an empty-normalized label (e.g. a future CJK-only
+            # row) matching everything via "" in body_norm.
+            entry["rows"] = [
+                {"label": r,
+                 "status": "present" if _normalize(r) and _normalize(r) in body_norm
+                           else "missing"}
+                for r in parse_required_rows(outline, req["label"])]
+        headings.append(entry)
+    return {"id": page_id, "present": True, "headings": headings}

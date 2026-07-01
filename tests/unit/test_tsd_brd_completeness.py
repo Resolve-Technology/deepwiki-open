@@ -74,3 +74,37 @@ def test_parse_generated_headings_ignores_fenced_hashes():
     heads = _parse_generated_headings(content)
     assert [h["anchor"] for h in heads] == ["real"]
     assert heads[0]["body"] == "```\n## Not A Heading\n```\nbody"
+
+
+from api.tsd_brd_completeness import _is_none_body, classify_page
+
+
+def test_is_none_body_variants():
+    assert _is_none_body("") is True
+    assert _is_none_body("None") is True
+    assert _is_none_body("無") is True
+    assert _is_none_body("N/A。") is True
+    assert _is_none_body("DB2/400 on AS400.") is False
+
+
+def test_classify_page_content_none_and_missing():
+    outline = "## System Platform\n## Program Flow\n## System Interface\n"
+    content = ("## 系統平台 (System Platform)\nDB2/400 on AS400.\n"
+               "## 程式流程 (Program Flow)\nNone\n")  # System Interface dropped
+    page = classify_page("page-tsd-system-overview", content, outline)
+    statuses = {h["label"]: h["status"] for h in page["headings"]}
+    assert statuses == {"System Platform": "content",
+                        "Program Flow": "empty_none",
+                        "System Interface": "missing"}
+
+
+def test_classify_page_enumerated_rows_present_and_missing():
+    outline = ("## Impact Analysis\nPresent as a table.\n"
+               "- Existing applications\n- Existing reports\n")
+    content = ("## 影響分析 (Impact Analysis)\n"
+               "| Item | Impact | Remarks |\n|---|---|---|\n"
+               "| Existing applications | None | |\n")  # Existing reports missing
+    page = classify_page("page-tsd-system-overview", content, outline)
+    rows = {r["label"]: r["status"] for r in page["headings"][0]["rows"]}
+    assert rows == {"Existing applications": "present",
+                    "Existing reports": "missing"}
