@@ -137,3 +137,36 @@ def test_check_completeness_aggregates_rows():
               "## x (Impact Analysis)\n| Existing applications | None | |\n"}]
     report = check_tsd_brd_completeness(pages, outlines)
     assert report["summary"]["rows"] == {"present": 1, "missing": 1}
+
+
+from api.tsd_brd_completeness import (
+    render_markdown_report, completeness_report_paths)
+
+
+def test_completeness_report_paths_derives_siblings():
+    j, m = completeness_report_paths("/x/deepwiki_cache_foo.json")
+    assert j == "/x/deepwiki_cache_foo.completeness.json"
+    assert m == "/x/deepwiki_cache_foo.completeness.md"
+
+
+def test_render_markdown_report_marks_statuses():
+    report = {
+        "summary": {"headings": {"content": 1, "empty_none": 1, "missing": 1},
+                    "rows": {"present": 1, "missing": 1},
+                    "pages_missing": ["page-b"]},
+        "pages": [
+            {"id": "page-a", "title": "A", "present": True, "headings": [
+                {"label": "Alpha", "level": 2, "status": "content"},
+                {"label": "Beta", "level": 2, "status": "empty_none"},
+                {"label": "Impact Analysis", "level": 2, "status": "content",
+                 "rows": [{"label": "Existing applications", "status": "present"},
+                          {"label": "Existing reports", "status": "missing"}]}]},
+            {"id": "page-b", "title": None, "present": False, "headings": [
+                {"label": "Gamma", "level": 2, "status": "missing"}]}]}
+    md = render_markdown_report(report)
+    assert "1 ok / 1 None / 1 MISSING" in md
+    assert "✓ Alpha" in md
+    assert "○ Beta" in md
+    assert "✗ Gamma" in md
+    assert "✗ Existing reports" in md
+    assert "page-b" in md  # missing page listed

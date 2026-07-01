@@ -158,3 +158,38 @@ def check_tsd_brd_completeness(pages: list, outlines: dict = TSD_BRD_OUTLINES) -
     return {"summary": {"headings": headings_count, "rows": rows_count,
                         "pages_missing": pages_missing},
             "pages": page_reports}
+
+
+_MARK = {"content": "✓", "empty_none": "○", "missing": "✗",
+         "present": "✓"}
+
+
+def completeness_report_paths(cache_path: str) -> tuple:
+    """(json, md) report paths beside a wikicache path ending in .json."""
+    base = cache_path[:-5] if cache_path.endswith(".json") else cache_path
+    return base + ".completeness.json", base + ".completeness.md"
+
+
+def render_markdown_report(report: dict) -> str:
+    """Human-readable Markdown: summary line + per-page ✓/○/✗ tables."""
+    h = report["summary"]["headings"]
+    r = report["summary"]["rows"]
+    lines = ["# TSD/BRD Completeness Report", "",
+             f"**Headings:** {h['content']} ok / {h['empty_none']} None / "
+             f"{h['missing']} MISSING",
+             f"**Rows:** {r['present']} present / {r['missing']} missing", ""]
+    missing_pages = report["summary"]["pages_missing"]
+    if missing_pages:
+        lines += ["**Pages entirely missing:** " + ", ".join(missing_pages), ""]
+    for page in report["pages"]:
+        title = page.get("title") or page["id"]
+        lines.append(f"## {title} (`{page['id']}`)")
+        if not page.get("present", True):
+            lines.append("_Page missing from generated wiki._")
+        for hd in page["headings"]:
+            indent = "  " * (hd["level"] - 2) if hd["level"] >= 2 else ""
+            lines.append(f"- {indent}{_MARK[hd['status']]} {hd['label']}")
+            for row in hd.get("rows", []):
+                lines.append(f"    - {_MARK[row['status']]} {row['label']}")
+        lines.append("")
+    return "\n".join(lines)
