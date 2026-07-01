@@ -581,12 +581,14 @@ async def run_generation(
             json.dump(report, f, ensure_ascii=False, indent=2)
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(render_markdown_report(report))
-        h = report["summary"]["headings"]
-        r = report["summary"]["rows"]
-        logger.info(f"TSD/BRD completeness [{repo.repo}]: headings "
-                    f"{h['content']} ok / {h['empty_none']} None / "
-                    f"{h['missing']} MISSING; rows {r['present']}/"
-                    f"{r['present'] + r['missing']}")
+        bd = report["summary"]["by_document"]
+        def _doc_summary(d: dict) -> str:
+            hh, rr = d["headings"], d["rows"]
+            return (f"{hh['content']} ok / {hh['empty_none']} None / "
+                    f"{hh['missing']} dropped (rows {rr['present']}/"
+                    f"{rr['present'] + rr['missing']})")
+        logger.info(f"TSD/BRD completeness [{repo.repo}]: "
+                    f"TSD {_doc_summary(bd['TSD'])} · BRD {_doc_summary(bd['BRD'])}")
     except Exception as e:
         logger.warning(f"TSD/BRD completeness check failed: {e}")
 
