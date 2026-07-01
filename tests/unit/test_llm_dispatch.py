@@ -175,3 +175,26 @@ def test_claude_cli_branch_propagates_errors(monkeypatch):
 
     with pytest.raises(ClaudeCLIError, match="status=429"):
         run(generate("claude_cli", "claude-sonnet-4-6", "P"))
+
+
+def test_claude_api_builds_api_key_client(monkeypatch):
+    captured = {}
+
+    class _FakeClient:
+        def __init__(self, api_key=None):
+            captured["api_key"] = api_key
+        def convert_inputs_to_api_kwargs(self, **kw):
+            return {}
+        async def acall(self, **kw):
+            async def _gen():
+                if False:
+                    yield None
+            return _gen()
+        last_usage = type("U", (), {"input_tokens": 0, "output_tokens": 0})()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-test")
+    monkeypatch.setattr(llm_dispatch, "AnthropicClient", _FakeClient)
+    monkeypatch.setattr(llm_dispatch, "get_model_config",
+                        lambda p, m: {"model_kwargs": {"max_tokens": 100}})
+    result = run(generate("claude_api", "claude-sonnet-5", "hi"))
+    assert captured["api_key"] == "sk-ant-api03-test"

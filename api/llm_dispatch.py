@@ -4,6 +4,7 @@ Returns (text, usage) for a fully-assembled prompt. Mirrors the provider
 branches of the websocket chat path for the providers this deployment uses;
 unsupported providers raise so jobs fail fast with a clear error.
 """
+import os
 import logging
 from dataclasses import dataclass
 
@@ -29,9 +30,17 @@ async def generate(provider: str, model: str, prompt: str) -> LLMResult:
     """Send a fully-assembled prompt, drain the stream, return text + usage."""
     model_config = get_model_config(provider, model)["model_kwargs"]
 
-    if provider == "claude":
-        logger.info(f"Dispatching to Claude (native Anthropic SDK) model: {model}")
-        client = AnthropicClient()
+    if provider in ("claude", "claude_api"):
+        if provider == "claude_api":
+            key = os.getenv("ANTHROPIC_API_KEY")
+            if not key:
+                raise ValueError(
+                    "ANTHROPIC_API_KEY is not set; the claude_api provider needs it.")
+            logger.info(f"Dispatching to Claude (native SDK, API key) model: {model}")
+            client = AnthropicClient(api_key=key)
+        else:
+            logger.info(f"Dispatching to Claude (native Anthropic SDK) model: {model}")
+            client = AnthropicClient()
         model_kwargs = {"model": model}
         # Same conditional passthrough as the websocket's claude branch (Opus
         # 4.7+ rejects temperature/top_p, so only forward what the config has).
