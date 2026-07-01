@@ -151,3 +151,40 @@ def test_convert_pops_usage_marker_flag():
     )
     assert kwargs["_include_usage_marker"] is True
     assert "include_usage_marker" not in kwargs  # never reaches the API params
+
+
+# --- api-key auth mode ---
+
+import api.anthropic_client as ac_mod
+
+
+class _FakeAsync:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+
+def test_api_key_mode_uses_x_api_key_no_oauth_beta(monkeypatch):
+    monkeypatch.setattr(ac_mod.anthropic, "AsyncAnthropic", _FakeAsync)
+    c = ac_mod.AnthropicClient(api_key="sk-ant-api03-xyz")
+    assert c._auth_mode() == "api_key"
+    client = c.init_async_client()
+    assert client.kwargs.get("api_key") == "sk-ant-api03-xyz"
+    assert "auth_token" not in client.kwargs
+    assert "default_headers" not in client.kwargs  # no oauth beta in api-key mode
+
+
+def test_oauth_mode_uses_auth_token_and_beta(monkeypatch):
+    monkeypatch.setattr(ac_mod.anthropic, "AsyncAnthropic", _FakeAsync)
+    c = ac_mod.AnthropicClient(auth_token="sk-ant-oat01-xyz")
+    assert c._auth_mode() == "oauth"
+    client = c.init_async_client()
+    assert client.kwargs.get("auth_token") == "sk-ant-oat01-xyz"
+    assert client.kwargs["default_headers"]["anthropic-beta"] == ac_mod.ANTHROPIC_OAUTH_BETA
+
+
+def test_env_anthropic_api_key_does_not_hijack_oauth(monkeypatch):
+    # A plain AnthropicClient() (the OAuth `claude` provider) must stay OAuth
+    # even if ANTHROPIC_API_KEY is set in the environment.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-envkey")
+    c = ac_mod.AnthropicClient()
+    assert c._auth_mode() == "oauth"

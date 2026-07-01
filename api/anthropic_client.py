@@ -117,13 +117,27 @@ class _ShimChunk:
 class AnthropicClient:
     """Streams chat completions through the native Anthropic Messages API."""
 
-    def __init__(self, auth_token: Optional[str] = None, base_url: Optional[str] = None):
+    def __init__(self, auth_token: Optional[str] = None,
+                 api_key: Optional[str] = None,
+                 base_url: Optional[str] = None):
         self._auth_token = auth_token
+        self._api_key = api_key
         self._base_url = base_url
         self._async_client: Optional[anthropic.AsyncAnthropic] = None
         # Usage of the most recent stream, for non-streaming consumers
         # (api/llm_dispatch.py); the websocket path ignores it.
         self.last_usage = None
+
+    def _auth_mode(self) -> str:
+        """'api_key' when constructed with a standard API key, else 'oauth'.
+        Keyed only on the explicit arg — never on env — so a global
+        ANTHROPIC_API_KEY can't hijack the OAuth `claude` provider."""
+        return "api_key" if self._api_key else "oauth"
+
+    def _resolve_api_key(self) -> str:
+        if not self._api_key:
+            raise ValueError("ANTHROPIC_API_KEY is not set for the claude_api provider.")
+        return self._api_key
 
     def _resolve_token(self) -> str:
         token = self._auth_token or os.getenv("CLAUDE_OAUTH_TOKEN")
@@ -147,12 +161,19 @@ class AnthropicClient:
 
     def init_async_client(self) -> anthropic.AsyncAnthropic:
         if self._async_client is None:
-            self._async_client = anthropic.AsyncAnthropic(
-                auth_token=self._resolve_token(),
-                base_url=self._resolve_base_url(),
-                default_headers={"anthropic-beta": ANTHROPIC_OAUTH_BETA},
-                max_retries=3,  # SDK backoff honors retry-after on 429/5xx
-            )
+            if self._auth_mode() == "api_key":
+                self._async_client = anthropic.AsyncAnthropic(
+                    api_key=self._resolve_api_key(),
+                    base_url=self._resolve_base_url(),
+                    max_retries=3,
+                )
+            else:
+                self._async_client = anthropic.AsyncAnthropic(
+                    auth_token=self._resolve_token(),
+                    base_url=self._resolve_base_url(),
+                    default_headers={"anthropic-beta": ANTHROPIC_OAUTH_BETA},
+                    max_retries=3,  # SDK backoff honors retry-after on 429/5xx
+                )
         return self._async_client
 
     def convert_inputs_to_api_kwargs(
