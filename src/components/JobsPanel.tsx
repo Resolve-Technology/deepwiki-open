@@ -1,7 +1,8 @@
 'use client';
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
+import { CompletenessSummary, completenessQuery, CompletenessReport } from './CompletenessSummary';
 
 // Matches the public dict served by /api/wiki_jobs
 interface WikiJob {
@@ -53,6 +54,35 @@ interface JobsPanelProps {
 
 export default function JobsPanel({ authCode, className = '' }: JobsPanelProps) {
   const [jobs, setJobs] = useState<WikiJob[]>([]);
+
+  // Completeness report per finished job, fetched once and cached by job id.
+  const [reports, setReports] = useState<Record<string, CompletenessReport | null>>({});
+  // Ids already fetched or in flight — a ref (not `reports`) so the effect
+  // depends only on `jobs` and never re-runs itself into duplicate fetches.
+  const fetchedRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    jobs
+      // Only the finished jobs actually rendered in `recentFinished` (done +
+      // within the display window) — not every retained done job in the API list.
+      .filter(j =>
+        j.status === 'done' &&
+        j.finished_at &&
+        Date.now() - new Date(j.finished_at).getTime() < FINISHED_WINDOW_MS &&
+        !fetchedRef.current.has(j.id))
+      .forEach(job => {
+        fetchedRef.current.add(job.id);  // mark before awaiting → no duplicate in-flight fetch
+        (async () => {
+          try {
+            const res = await fetch(`/api/wiki_completeness?${completenessQuery(job)}&format=json`);
+            const data = res.ok ? await res.json() : null;
+            setReports(prev => ({ ...prev, [job.id]: data as CompletenessReport | null }));
+          } catch {
+            setReports(prev => ({ ...prev, [job.id]: null }));
+          }
+        })();
+      });
+  }, [jobs]);
 
   const fetchJobs = useCallback(async () => {
     try {
@@ -147,27 +177,35 @@ export default function JobsPanel({ authCode, className = '' }: JobsPanelProps) 
       {recentFinished.length > 0 && (
         <ul className="space-y-1">
           {recentFinished.map(job => (
-            <li key={job.id} className="flex items-center justify-between gap-3 text-xs">
-              <Link href={jobWikiUrl(job)} className="text-[var(--foreground)] hover:text-[var(--accent-primary)] truncate">
-                {job.repo.owner}/{job.repo.repo}
-                <span className="text-[var(--muted)]"> · {job.provider}/{job.model}</span>
-              </Link>
-              <span className="flex items-center gap-1.5 flex-shrink-0">
-                <span
-                  className={`px-2 py-0.5 rounded-full border ${statusBadgeClasses[job.status] || statusBadgeClasses.queued}`}
-                  title={job.error || undefined}
-                >
-                  {job.status}
+            <li key={job.id} className="text-xs">
+              <div className="flex items-center justify-between gap-3">
+                <Link href={jobWikiUrl(job)} className="text-[var(--foreground)] hover:text-[var(--accent-primary)] truncate">
+                  {job.repo.owner}/{job.repo.repo}
+                  <span className="text-[var(--muted)]"> · {job.provider}/{job.model}</span>
+                </Link>
+                <span className="flex items-center gap-1.5 flex-shrink-0">
+                  <span
+                    className={`px-2 py-0.5 rounded-full border ${statusBadgeClasses[job.status] || statusBadgeClasses.queued}`}
+                    title={job.error || undefined}
+                  >
+                    {job.status}
+                  </span>
+                  <button
+                    onClick={() => removeJob(job.id)}
+                    title="Remove from this list"
+                    aria-label="Remove job"
+                    className="px-1.5 py-0.5 rounded border border-[var(--border-color)] text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-[var(--background)] transition-colors leading-none"
+                  >
+                    ×
+                  </button>
                 </span>
-                <button
-                  onClick={() => removeJob(job.id)}
-                  title="Remove from this list"
-                  aria-label="Remove job"
-                  className="px-1.5 py-0.5 rounded border border-[var(--border-color)] text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-[var(--background)] transition-colors leading-none"
-                >
-                  ×
-                </button>
-              </span>
+              </div>
+              {job.status === 'done' && (
+                <CompletenessSummary
+                  report={reports[job.id] ?? null}
+                  mdHref={`/api/wiki_completeness?${completenessQuery(job)}&format=md`}
+                />
+              )}
             </li>
           ))}
         </ul>
