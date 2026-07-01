@@ -27,6 +27,27 @@ CLAUDE_CLI_BIN = os.getenv("CLAUDE_CLI_BIN", "claude")
 # A single page can take minutes; allow a generous, env-tunable ceiling.
 CLAUDE_CLI_TIMEOUT = float(os.getenv("CLAUDE_CLI_TIMEOUT", "600"))
 
+# Concurrent `claude -p` invocations fail fast with EMPTY stdout+stderr and a
+# nonzero exit: the CLI races on the shared ~/.claude config and/or the
+# subscription's concurrent-request limit. A single call always succeeds, so we
+# serialize the CLI path with a process-wide semaphore (default 1). Generation
+# runs in one API process, so this reliably caps it; raise via env only if a
+# higher concurrency is proven safe.
+CLAUDE_CLI_MAX_CONCURRENCY = max(1, int(os.getenv("CLAUDE_CLI_MAX_CONCURRENCY", "1")))
+# Even serialized, a call can fail transiently (API overload, a lost config
+# race); retry a few times with backoff before giving up on the page.
+CLAUDE_CLI_RETRIES = max(1, int(os.getenv("CLAUDE_CLI_RETRIES", "3")))
+
+# Created lazily so it binds to the running event loop, not import-time state.
+_cli_semaphore: "asyncio.Semaphore | None" = None
+
+
+def _get_semaphore() -> "asyncio.Semaphore":
+    global _cli_semaphore
+    if _cli_semaphore is None:
+        _cli_semaphore = asyncio.Semaphore(CLAUDE_CLI_MAX_CONCURRENCY)
+    return _cli_semaphore
+
 
 class ClaudeCLIError(RuntimeError):
     """Raised when `claude -p` fails to run or reports an error payload."""
@@ -36,10 +57,35 @@ async def run_claude_cli(model: str, prompt: str, *,
                          timeout: float = CLAUDE_CLI_TIMEOUT) -> tuple[str, int, int]:
     """Run `claude -p` for one prompt; return (text, input_tokens, output_tokens).
 
+    Serialized against other CLI calls (see CLAUDE_CLI_MAX_CONCURRENCY) because
+    concurrent invocations fail fast with empty output, and retried a few times
+    on transient failure. Retries happen while holding the semaphore so a failing
+    call never adds concurrency.
+    """
+    prompt = _LEADING_NO_THINK.sub("", prompt, count=1)
+    async with _get_semaphore():
+        last_err: "ClaudeCLIError | None" = None
+        for attempt in range(1, CLAUDE_CLI_RETRIES + 1):
+            try:
+                return await _invoke_once(model, prompt, timeout)
+            except ClaudeCLIError as e:
+                last_err = e
+                if attempt < CLAUDE_CLI_RETRIES:
+                    backoff = min(2 ** attempt, 10)
+                    log.warning(f"claude -p attempt {attempt}/{CLAUDE_CLI_RETRIES} "
+                                f"failed ({e}); retrying in {backoff}s")
+                    await asyncio.sleep(backoff)
+        assert last_err is not None
+        raise last_err
+
+
+async def _invoke_once(model: str, prompt: str,
+                       timeout: float) -> tuple[str, int, int]:
+    """One `claude -p` run.
+
     The CLI exits 0 even on API errors and signals them inside the JSON, so we
     inspect ``is_error`` / ``subtype`` rather than trusting the exit code alone.
     """
-    prompt = _LEADING_NO_THINK.sub("", prompt, count=1)
     cmd = [
         CLAUDE_CLI_BIN, "-p",
         "--model", model,
@@ -63,9 +109,13 @@ async def run_claude_cli(model: str, prompt: str, *,
         raise ClaudeCLIError(f"claude -p timed out after {timeout}s")
 
     if proc.returncode != 0:
+        # Concurrent-failure exits leave stderr empty and put any payload on
+        # stdout, so surface both to keep the cause diagnosable.
+        err = stderr.decode(errors="replace").strip()
+        out = stdout.decode(errors="replace").strip()
         raise ClaudeCLIError(
             f"claude -p exited {proc.returncode}: "
-            f"{stderr.decode(errors='replace')[:500]}")
+            f"stderr={err[:400]!r} stdout={out[:400]!r}")
 
     try:
         payload = json.loads(stdout.decode())
