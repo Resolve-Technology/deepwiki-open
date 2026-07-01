@@ -7,6 +7,7 @@ import ModelSelectionModal from '@/components/ModelSelectionModal';
 import WikiReviewModal from '@/components/WikiReviewModal';
 import ThemeToggle from '@/components/theme-toggle';
 import WikiTreeView from '@/components/WikiTreeView';
+import { WikiCompletenessBadge } from '@/components/WikiCompletenessBadge';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { RepoInfo } from '@/types/repoinfo';
 import getRepoUrl from '@/utils/getRepoUrl';
@@ -1165,6 +1166,13 @@ export default function RepoWikiPage() {
                       {wikiMeta.generatedAt ? ` · ${new Date(wikiMeta.generatedAt).toLocaleString()}` : ''}
                     </p>
                   )}
+
+                  <WikiCompletenessBadge
+                    repoInfo={effectiveRepoInfo}
+                    language={language}
+                    provider={selectedProviderState}
+                    model={selectedModelState}
+                  />
 
                   <div className="prose prose-sm md:prose-base lg:prose-lg max-w-none">
                     <Markdown
