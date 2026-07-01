@@ -35,8 +35,12 @@ existing `claude` provider stays on the subscription (Haiku) unchanged.
 Add an `api_key` parameter to `__init__(self, auth_token=None, api_key=None, base_url=None)`.
 `init_async_client` selects the mode:
 
-- **api-key mode** — when `api_key` (constructor arg) or the `ANTHROPIC_API_KEY`
-  env var is present: build `anthropic.AsyncAnthropic(api_key=<key>, base_url=<resolved>, max_retries=3)` with **no** `anthropic-beta` header. (`x-api-key` auth.)
+- **api-key mode** — when the explicit `api_key` constructor arg is present
+  (NOT auto-detected from `ANTHROPIC_API_KEY` env — that would let a global env
+  key silently flip the OAuth `claude` provider to api-key mode; the dispatch
+  reads the env var and passes it explicitly for `claude_api` only): build
+  `anthropic.AsyncAnthropic(api_key=<key>, base_url=<resolved>, max_retries=3)`
+  with **no** `anthropic-beta` header. (`x-api-key` auth.)
 - **OAuth mode** — otherwise: the current
   `anthropic.AsyncAnthropic(auth_token=<CLAUDE_OAUTH_TOKEN>, base_url=<resolved>, default_headers={"anthropic-beta": "oauth-2025-04-20"}, max_retries=3)`.
 

@@ -420,6 +420,19 @@ def test_self_heal_md(tmp_path):
 
 def test_no_report_and_no_wikicache_returns_none(tmp_path):
     assert read_completeness_report(str(tmp_path / "deepwiki_cache_x.json"), "json") is None
+
+
+def test_self_heal_legacy_cache_uses_repo_url(tmp_path):
+    # Old-format cache: no `repo` dict, only `repo_url`.
+    cache = tmp_path / "deepwiki_cache_x.json"
+    cache.write_text(json.dumps({
+        "repo_url": "https://gitlab/x/y", "provider": "claude", "model": "haiku",
+        "generated_at": "2026-07-01T00:00:00Z",
+        "generated_pages": {"page-tsd-a": {"id": "page-tsd-a", "title": "A",
+                                           "content": "## a (Alpha)\nreal\n"}},
+    }), encoding="utf-8")
+    data, _ = read_completeness_report(str(cache), "json")
+    assert data["repo"] == "https://gitlab/x/y"  # not "None/None"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -477,10 +490,14 @@ def _rebuild_from_wikicache(cache_path: str, json_path: str, md_path: str):
     with open(cache_path, encoding="utf-8") as f:
         wc = json.load(f)
     repo = wc.get("repo") or {}
+    # Old-format caches may lack the repo dict (repo is Optional, falls back to
+    # repo_url) — avoid a "None/None" repo string in the rebuilt report.
+    repo_str = (f"{repo.get('owner')}/{repo.get('repo')}"
+                if (repo.get("owner") or repo.get("repo"))
+                else (wc.get("repo_url") or ""))
     payload = build_report_payload(
         list((wc.get("generated_pages") or {}).values()),
-        f"{repo.get('owner')}/{repo.get('repo')}",
-        wc.get("provider"), wc.get("model"), wc.get("generated_at"))
+        repo_str, wc.get("provider"), wc.get("model"), wc.get("generated_at"))
     atomic_write_text(json_path, json.dumps(payload, ensure_ascii=False, indent=2))
     atomic_write_text(md_path, render_markdown_report(payload))
     return payload
@@ -540,7 +557,7 @@ git commit -m "feat: atomic report writes + read-time self-heal from wikicache"
 
 - [ ] **Step 1: Update imports**
 
-In `api/wiki_generator.py`, add to the `from api.tsd_brd_completeness import (...)` block: `build_report_payload`. Add a new import: `from api.completeness_io import atomic_write_text`.
+In `api/wiki_generator.py`, update the `from api.tsd_brd_completeness import (...)` block: **add** `build_report_payload` and **remove** `check_tsd_brd_completeness` (it becomes unused after this task — first `grep -n check_tsd_brd_completeness api/wiki_generator.py` to confirm the only use is the report block being replaced below; keep `completeness_report_paths` and `render_markdown_report`). Add a new import: `from api.completeness_io import atomic_write_text`.
 
 - [ ] **Step 2: Rewrite the report-write to use the shared builder + atomic writes**
 
