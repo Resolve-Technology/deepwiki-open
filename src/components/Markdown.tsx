@@ -34,6 +34,54 @@ const CitationSnippet: React.FC<{ label: string; snippet?: string }> = ({ label,
   );
 };
 
+// A verified whole-file citation (e.g. "Sources: BV401.txt") has no line
+// snippet to inline. Clicking fetches the file from the backend (which reads the
+// local clone) and shows it in a scrollable box — so the source is visible in
+// the wiki even when the git host (e.g. a LAN-only GitLab) isn't reachable from
+// the browser.
+const WholeFileCitation: React.FC<{ label: string; filePath: string; repoInfo: RepoInfo }> = ({ label, filePath, repoInfo }) => {
+  const [open, setOpen] = React.useState(false);
+  const [content, setContent] = React.useState<string | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+  const [loading, setLoading] = React.useState(false);
+  const badge = "text-green-700 dark:text-green-400 font-medium hover:underline";
+
+  const toggle = async () => {
+    const next = !open;
+    setOpen(next);
+    if (!next || content !== null || loading) return;
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({
+        file_path: filePath, repo_type: repoInfo.type,
+        owner: repoInfo.owner ?? '', repo: repoInfo.repo ?? '',
+      });
+      if (repoInfo.localPath) params.set('local_path', repoInfo.localPath);
+      const res = await fetch(`/api/repo_file?${params.toString()}`);
+      const data = await res.json();
+      if (!res.ok) setError(data?.error || `Error ${res.status}`);
+      else setContent((data.content ?? '') + (data.truncated ? '\n… (truncated)' : ''));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <span className="citation-verified">
+      <button type="button" onClick={toggle} aria-expanded={open} className={badge}>
+        ✓ {label}
+      </button>
+      <span
+        className={`block font-mono text-xs whitespace-pre overflow-auto max-h-96 my-1 p-2 rounded bg-gray-100 dark:bg-gray-800 ${open ? '' : 'hidden'}`}
+      >
+        {loading ? 'Loading…' : error ? `⚠ ${error}` : content}
+      </span>
+    </span>
+  );
+};
+
 // A broken citation: the cited file/lines were not in the source we gave the
 // model, so the claim may be fabricated.
 const BrokenCitation: React.FC<{ label: string; reason?: string }> = ({ label, reason }) => (
@@ -134,6 +182,13 @@ const Markdown: React.FC<MarkdownProps> = ({ content, repoInfo, citations }) => 
       const info = citationKey ? citations?.[citationKey] : undefined;
       if (citationKey && info) {
         if (info.status === 'verified') {
+          // A whole-file citation (e.g. "Sources: BV401.txt") is verified by
+          // presence and carries no snippet. Show the file inline (fetched from
+          // the local clone) instead of an inert badge or an unreachable git
+          // host link.
+          if (!info.snippet && cite && repoInfo) {
+            return <WholeFileCitation label={citationKey} filePath={cite.filePath} repoInfo={repoInfo} />;
+          }
           return <CitationSnippet label={citationKey} snippet={info.snippet} />;
         }
         return <BrokenCitation label={citationKey} reason={info.reason} />;

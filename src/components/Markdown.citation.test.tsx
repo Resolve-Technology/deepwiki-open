@@ -60,14 +60,23 @@ describe('Markdown citation grounding', () => {
     expect(html).toContain('✓');                    // rendered as a verified badge
   });
 
-  it('verified whole-file citation shows a badge, no link', () => {
+  it('verified whole-file citation renders an inline expander, not a git host link', () => {
     const citations = {
       'CAL101.txt': { status: 'verified', filePath: 'CAL101.txt' },
     };
     const html = render('Sources: [CAL101.txt]()', gitlab, citations);
-    expect(html).toContain('✓');                    // verified badge, not a link
-    expect(html).not.toMatch(/<a[^>]*>/);           // no anchor element at all
-    expect(html).not.toContain('/-/blob/');
+    expect(html).toContain('✓');                    // still marked verified
+    expect(html).toContain('<button');              // click-to-expand, fetched inline
+    expect(html).not.toContain('/-/blob/');         // NOT a (unreachable) gitlab link
+  });
+
+  it('verified whole-file citation on a local repo also renders the inline expander', () => {
+    const citations = {
+      'x.txt': { status: 'verified', filePath: 'x.txt' },
+    };
+    const html = render('Sources: [x.txt]()', local, citations);
+    expect(html).toContain('✓');
+    expect(html).toContain('<button');
   });
 
   it('broken citation shows a red unverified marker, no link', () => {

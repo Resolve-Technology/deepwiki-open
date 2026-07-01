@@ -373,6 +373,52 @@ async def get_local_repo_structure(path: str = Query(None, description="Path to 
             content={"error": "Error processing local repository."}
         )
 
+@app.get("/repo_file")
+async def get_repo_file(
+    file_path: str = Query(..., description="File path relative to the repo root"),
+    repo_type: str = Query("github", description="Repository type"),
+    owner: str = Query("", description="Repository owner"),
+    repo: str = Query("", description="Repository name"),
+    local_path: str = Query(None, description="Local path (for type=local)"),
+):
+    """Return the raw text of one file from the locally cloned repository.
+
+    Powers inline source display for citations whose host (e.g. a private
+    GitLab reachable only on the LAN) cannot be opened from the browser. Reads
+    strictly from within the repo's own directory; path traversal is rejected.
+    """
+    if repo_type == "local" and local_path:
+        repo_dir = os.path.realpath(local_path)
+    else:
+        repo_dir = os.path.realpath(
+            os.path.join(get_adalflow_default_root_path(), "repos", f"{owner}_{repo}"))
+    if not os.path.isdir(repo_dir):
+        return JSONResponse(status_code=404, content={"error": "Repository not found."})
+
+    target = os.path.realpath(os.path.join(repo_dir, file_path))
+    if target != repo_dir and not target.startswith(repo_dir + os.sep):
+        logger.warning(f"Rejected repo_file path outside repo: {target}")
+        return JSONResponse(status_code=403, content={"error": "Path outside repository."})
+    if not os.path.isfile(target):
+        return JSONResponse(status_code=404, content={"error": "File not found."})
+
+    # COBOL/copybook sources are often latin-1 (EBCDIC origin), not UTF-8.
+    try:
+        try:
+            with open(target, "r", encoding="utf-8") as f:
+                content = f.read()
+        except UnicodeDecodeError:
+            with open(target, "r", encoding="latin-1") as f:
+                content = f.read()
+    except Exception as e:
+        logger.error(f"Error reading repo file {target}: {e}")
+        return JSONResponse(status_code=500, content={"error": "Error reading file."})
+
+    MAX_CHARS = 200_000  # guard against pathologically large files
+    truncated = len(content) > MAX_CHARS
+    return {"path": file_path, "content": content[:MAX_CHARS], "truncated": truncated}
+
+
 def generate_markdown_export(repo_url: str, pages: List[WikiPage],
                              provider: Optional[str] = None, model: Optional[str] = None,
                              generated_at: Optional[str] = None,
