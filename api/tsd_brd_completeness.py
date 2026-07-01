@@ -35,3 +35,24 @@ def parse_required_headings(outline: str) -> list:
         if m:
             out.append({"label": m.group(2).strip(), "level": len(m.group(1))})
     return out
+
+
+# (page_id, section English label) blocks whose outline bullets are required
+# table rows. Extend this set to row-check more sections — the labels already
+# live in TSD_BRD_OUTLINES, so no new data is needed.
+ENUMERATED_SECTIONS = {("page-tsd-system-overview", "Impact Analysis")}
+
+
+def parse_required_rows(outline: str, section_label: str) -> list:
+    """The ``- `` bullet labels directly under ``## <section_label>`` (up to the
+    next heading). Prose lines and bullets in other sections are ignored."""
+    target = _normalize(section_label)
+    rows, in_section = [], False
+    for line in (outline or "").splitlines():
+        m = _OUTLINE_H.match(line)
+        if m:
+            in_section = _normalize(m.group(2)) == target
+            continue
+        if in_section and line.strip().startswith("- "):
+            rows.append(line.strip()[2:].strip())
+    return rows
