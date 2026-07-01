@@ -47,3 +47,40 @@ describe('CompletenessSummary', () => {
     expect(q).toContain('model=claude-haiku-4-5-20251001');
   });
 });
+
+const byDocReport: CompletenessReport = {
+  summary: {
+    headings: { content: 48, empty_none: 4, missing: 1 },
+    rows: { present: 20, missing: 2 }, pages_missing: [],
+    by_document: {
+      TSD: { headings: { content: 30, empty_none: 2, missing: 1 },
+             rows: { present: 20, missing: 2 } },
+      BRD: { headings: { content: 18, empty_none: 2, missing: 0 },
+             rows: { present: 0, missing: 0 } },
+    },
+  },
+};
+
+describe('CompletenessSummary by_document', () => {
+  it('renders separate TSD and BRD lines with an Impact rows line', () => {
+    const html = renderToStaticMarkup(
+      React.createElement(CompletenessSummary, { report: byDocReport, mdHref: '/x?format=md' }));
+    expect(html).toContain('TSD:');
+    expect(html).toContain('30 ok / 2 None /');
+    expect(html).toContain('BRD:');
+    expect(html).toContain('18 ok / 2 None /');
+    expect(html).toContain('Impact rows: 20/22');
+    expect(html).toMatch(/text-red-600/);          // TSD missing=1 and rows missing>0
+    expect(html).toContain('view full report');
+  });
+
+  it('falls back to the grand-total line when by_document is absent', () => {
+    const legacy: CompletenessReport = {
+      summary: { headings: { content: 45, empty_none: 6, missing: 1 },
+                 rows: { present: 21, missing: 1 }, pages_missing: [] } };
+    const html = renderToStaticMarkup(
+      React.createElement(CompletenessSummary, { report: legacy, mdHref: '/x?format=md' }));
+    expect(html).toContain('Completeness: 45 ok / 6 None /');
+    expect(html).not.toContain('TSD:');
+  });
+});
