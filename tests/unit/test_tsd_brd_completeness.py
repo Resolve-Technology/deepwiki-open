@@ -76,7 +76,8 @@ def test_parse_generated_headings_ignores_fenced_hashes():
     assert heads[0]["body"] == "```\n## Not A Heading\n```\nbody"
 
 
-from api.tsd_brd_completeness import _is_none_body, classify_page
+from api.tsd_brd_completeness import (
+    _is_none_body, classify_page, check_tsd_brd_completeness)
 
 
 def test_is_none_body_variants():
@@ -108,3 +109,31 @@ def test_classify_page_enumerated_rows_present_and_missing():
     rows = {r["label"]: r["status"] for r in page["headings"][0]["rows"]}
     assert rows == {"Existing applications": "present",
                     "Existing reports": "missing"}
+
+
+def test_check_completeness_summary_and_missing_page():
+    outlines = {
+        "page-a": "## Alpha\n## Beta\n",
+        "page-b": "## Gamma\n",   # this page will be absent from `pages`
+    }
+    pages = [
+        {"id": "page-a", "title": "A", "content":
+            "## a (Alpha)\nreal content\n## b (Beta)\nNone\n"},
+        {"id": "page-ignored", "title": "X", "content": "## whatever\n"},
+    ]
+    report = check_tsd_brd_completeness(pages, outlines)
+    assert report["summary"]["headings"] == {
+        "content": 1, "empty_none": 1, "missing": 1}
+    assert report["summary"]["pages_missing"] == ["page-b"]
+    ids = [p["id"] for p in report["pages"]]
+    assert ids == ["page-a", "page-b"]           # ignored page excluded, order preserved
+    assert report["pages"][1]["present"] is False
+
+
+def test_check_completeness_aggregates_rows():
+    outlines = {"page-tsd-system-overview":
+                "## Impact Analysis\n- Existing applications\n- Existing reports\n"}
+    pages = [{"id": "page-tsd-system-overview", "title": "SO", "content":
+              "## x (Impact Analysis)\n| Existing applications | None | |\n"}]
+    report = check_tsd_brd_completeness(pages, outlines)
+    assert report["summary"]["rows"] == {"present": 1, "missing": 1}
