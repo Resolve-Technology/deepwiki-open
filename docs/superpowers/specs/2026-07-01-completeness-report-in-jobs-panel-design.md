@@ -41,7 +41,11 @@ Resolution: `get_wiki_cache_path(owner, repo, repo_type, language, provider,
 model)` → `completeness_report_paths(cache_path)` (from
 `api.tsd_brd_completeness`) → the sibling `.completeness.json` / `.md` paths.
 `get_wiki_cache_path` already enforces the path-traversal guards, so no new
-validation is needed.
+validation is needed. Note: unlike `/api/wiki_cache`, this endpoint does not
+fall back to the "newest" cached version when `provider`/`model` are omitted —
+it resolves the exact (versioned) filename for the given params (or the legacy
+un-versioned one when both are absent). The Jobs panel always supplies
+`provider`+`model`, so this is not a concern for the caller in this spec.
 
 - `format=json`: if the `.completeness.json` file exists, read and return the
   parsed object; otherwise return **200 with a null body** (matching

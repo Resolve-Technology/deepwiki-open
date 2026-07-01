@@ -403,9 +403,15 @@ git commit -m "feat: CompletenessSummary component + completenessQuery helper"
 **Interfaces:**
 - Consumes: `CompletenessSummary`, `completenessQuery`, `CompletenessReport` (Task 4); existing `jobs` state (array of `WikiJob`).
 
-- [ ] **Step 1: Add the import**
+- [ ] **Step 1: Add the imports**
 
-After the existing imports at the top of `src/components/JobsPanel.tsx`:
+Add `useRef` to the existing React import at the top of `src/components/JobsPanel.tsx` (it currently imports `useCallback, useEffect, useState`):
+
+```tsx
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+```
+
+And add, after the existing imports:
 
 ```tsx
 import { CompletenessSummary, completenessQuery, CompletenessReport } from './CompletenessSummary';
@@ -418,20 +424,32 @@ Immediately after `const [jobs, setJobs] = useState<WikiJob[]>([]);` (line 55), 
 ```tsx
   // Completeness report per finished job, fetched once and cached by job id.
   const [reports, setReports] = useState<Record<string, CompletenessReport | null>>({});
+  // Ids already fetched or in flight — a ref (not `reports`) so the effect
+  // depends only on `jobs` and never re-runs itself into duplicate fetches.
+  const fetchedRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     jobs
-      .filter(j => j.status === 'done' && !(j.id in reports))
-      .forEach(async job => {
-        try {
-          const res = await fetch(`/api/wiki_completeness?${completenessQuery(job)}&format=json`);
-          const data = res.ok ? await res.json() : null;
-          setReports(prev => ({ ...prev, [job.id]: data as CompletenessReport | null }));
-        } catch {
-          setReports(prev => ({ ...prev, [job.id]: null }));
-        }
+      // Only the finished jobs actually rendered in `recentFinished` (done +
+      // within the display window) — not every retained done job in the API list.
+      .filter(j =>
+        j.status === 'done' &&
+        j.finished_at &&
+        Date.now() - new Date(j.finished_at).getTime() < FINISHED_WINDOW_MS &&
+        !fetchedRef.current.has(j.id))
+      .forEach(job => {
+        fetchedRef.current.add(job.id);  // mark before awaiting → no duplicate in-flight fetch
+        (async () => {
+          try {
+            const res = await fetch(`/api/wiki_completeness?${completenessQuery(job)}&format=json`);
+            const data = res.ok ? await res.json() : null;
+            setReports(prev => ({ ...prev, [job.id]: data as CompletenessReport | null }));
+          } catch {
+            setReports(prev => ({ ...prev, [job.id]: null }));
+          }
+        })();
       });
-  }, [jobs, reports]);
+  }, [jobs]);
 ```
 
 - [ ] **Step 3: Render the summary under each finished done job**
@@ -579,6 +597,12 @@ git commit -m "chore: bump APP_VERSION for completeness report in Jobs panel"
 - Tests → Task 1 (reader: json/md/absent/malformed), Task 4 (component + query helper). ✓
 
 **Deviation from spec test items (justified):** The spec listed a `JobsPanel` vitest test rendering the summary line. The repo's vitest env is **node with no jsdom/testing-library** and uses `renderToStaticMarkup` (no effects), so JobsPanel's fetch-driven behavior isn't unit-testable without new deps. The testable seam is therefore the prop-driven `CompletenessSummary` component + `completenessQuery` helper (Task 4), which cover the spec's intent (summary rendered from a report; nothing rendered from null). The JobsPanel wiring (Task 5) is verified by type-check + the Task 6 e2e, consistent with the codebase (JobsPanel's existing job-fetch effect is likewise not unit-tested). Similarly, the backend endpoint's file-read logic is tested via the log-safe `api/completeness_io.py` (Task 1) rather than a heavy TestClient test.
+
+**Independent-review nits folded in:**
+- The Task 5 effect now filters to the *displayed* recent done jobs (same `finished_at`/`FINISHED_WINDOW_MS` window as `recentFinished`) instead of every retained done job in the `/api/wiki_jobs` response (which keeps up to 50), and uses a `fetchedRef` seen-set with `[jobs]`-only deps to prevent duplicate/in-flight refetches.
+- **Endpoint route-level test (deliberately omitted):** a `TestClient` test of `/api/wiki_completeness` is *feasible* by setting `LOG_FILE_PATH` to a fresh file under `api/logs/` before importing `api.api` (the sandbox's only blocker is the root-owned `api/logs/application.log`). It is omitted here because such a test would `skip` in this sandbox (and the same import already breaks the pre-existing `test_wiki_jobs.py`/`test_wiki_generator.py`/`test_wiki_cache_versions.py` locally), giving no signal during execution. The endpoint's file-read logic is covered by Task 1, and its route wiring (alias binding, null/404 conventions, content type) is exercised live by Task 6's curls. Adding an automated `TestClient` test is a reasonable CI follow-up.
+- **`Response` vs `PlainTextResponse`:** the spec named `PlainTextResponse`; the plan uses `Response(content=..., media_type="text/markdown; charset=utf-8")`. These are equivalent (`PlainTextResponse` is just `Response` with a `text/plain` default that we override anyway), and `Response` is already imported — no new import needed.
+- **Resolution when `provider`/`model` omitted:** unlike `/api/wiki_cache`, this endpoint does NOT fall back to the "newest" cached version when `provider`/`model` are absent — `get_wiki_cache_path` then resolves the legacy un-versioned filename. This never bites in practice because `JobsPanel` always supplies both (required `WikiJob` fields); a future caller omitting them should pass provider+model explicitly. (Also noted in the design doc.)
 
 **Placeholder scan:** none — every code/test step contains complete code.
 
