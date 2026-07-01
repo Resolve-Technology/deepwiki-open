@@ -346,8 +346,10 @@ TSD_BRD_OUTLINES = {
     ),
     "page-tsd-program-inventory": (
         "## Program Inventory\n"
-        "(One ### subsection per program/module: business function and key logic. "
-        "May also summarise as a table: Program | Business Function | Key Logic.)\n"
+        "(REQUIRED: FIRST a summary table with columns `Program | Function | Key Logic` "
+        "— one row per program/module (the source program members). THEN, below the "
+        "table, one `###` subsection per program with its brief key points. Do not "
+        "omit the table.)\n"
     ),
     "page-tsd-batch-processing": (
         "## Schedule / Batch Processing\n"
@@ -407,7 +409,8 @@ TSD_BRD_OUTLINES = {
 def build_page_prompt(page_title: str, file_paths: List[str], language: str,
                       deep_dive: bool, repo_url: str, repo_type: str,
                       default_branch: str,
-                      required_outline: Optional[str] = None) -> str:
+                      required_outline: Optional[str] = None,
+                      omit_general_intro: bool = False) -> str:
     """Build the standard or deep-dive page generation prompt.
 
     file_paths are linked via generate_file_url so the <details> block
@@ -488,6 +491,22 @@ def build_page_prompt(page_title: str, file_paths: List[str], language: str,
             + required_outline.strip() + "\n"
             "[/TEMPLATE]\n"
             "\n"
+        )
+
+    # TSD chapters (omit_general_intro) must not each repeat a general project
+    # overview — that lives once in the Introduction chapter. Other pages keep
+    # the standard 1-2 paragraph introduction.
+    if omit_general_intro:
+        intro_instruction = (
+            "1.  **No general introduction:** Do NOT open with a general "
+            "introduction or a project/overview paragraph — the dedicated "
+            "Introduction chapter already covers the overall purpose, scope, and "
+            "high-level overview. Begin directly with this page's required "
+            "template sections below.\n"
+        )
+    else:
+        intro_instruction = (
+            f"1.  **Introduction:** Start with a concise introduction (1-2 paragraphs) explaining the purpose, scope, and high-level overview of \"{page_title}\" within the context of the overall project. If relevant, and if information is available in the provided files, link to other potential wiki pages using the format `[Link Text](#page-anchor-or-id)`.\n"
         )
 
     if deep_dive:
@@ -614,7 +633,7 @@ def build_page_prompt(page_title: str, file_paths: List[str], language: str,
             + outline_clause +
             "Based ONLY on the content of the `[RELEVANT_SOURCE_FILES]`:\n"
             "\n"
-            f"1.  **Introduction:** Start with a concise introduction (1-2 paragraphs) explaining the purpose, scope, and high-level overview of \"{page_title}\" within the context of the overall project. If relevant, and if information is available in the provided files, link to other potential wiki pages using the format `[Link Text](#page-anchor-or-id)`.\n"
+            + intro_instruction +
             "\n"
             f"2.  **Detailed Sections:** Break down \"{page_title}\" into logical sections using H2 (`##`) and H3 (`###`) Markdown headings. For each section:\n"
             "    *   Explain the architecture, components, data flow, or logic relevant to the section's focus, as evidenced in the source files.\n"

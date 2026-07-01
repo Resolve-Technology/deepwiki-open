@@ -331,3 +331,34 @@ def test_outline_clause_requires_bilingual_table_rows():
     # label in parentheses, like headings
     assert "table row" in prompt.lower()
     assert "in parentheses" in prompt.lower()
+
+
+# ---------------------------------------------------------------------------
+# omit_general_intro and program_inventory_requires tests
+# ---------------------------------------------------------------------------
+
+def _page_prompt(**kw):
+    base = dict(page_title="系統概觀 (System Overview)", file_paths=["BV401.txt"],
+                language="zh-tw", deep_dive=False, repo_url="https://x/repo",
+                repo_type="gitlab", default_branch="main",
+                required_outline=TSD_BRD_OUTLINES["page-tsd-system-overview"])
+    base.update(kw)
+    return build_page_prompt(**base)
+
+
+def test_omit_general_intro_replaces_the_intro_instruction():
+    p = _page_prompt(omit_general_intro=True)
+    assert "concise introduction (1-2 paragraphs)" not in p
+    assert "Do NOT open with a general introduction" in p
+
+
+def test_default_keeps_the_general_intro_instruction():
+    p = _page_prompt()  # omit_general_intro defaults to False (BRD/Wiki behaviour)
+    assert "concise introduction (1-2 paragraphs)" in p
+    assert "Do NOT open with a general introduction" not in p
+
+
+def test_program_inventory_requires_a_table():
+    outline = TSD_BRD_OUTLINES["page-tsd-program-inventory"]
+    assert "Program | Function | Key Logic" in outline
+    assert "REQUIRED" in outline
