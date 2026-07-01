@@ -115,6 +115,30 @@ def _lookup(source_map: Dict[str, FileSource], file_path: str) -> Optional[FileS
 # citation candidates.
 _EMPTY_LINK_RE = re.compile(r"\[([^\]]+)\]\(\)")
 
+# A bracketed label NOT already followed by a link `(`, a reference `[`, or a
+# reference-definition `:`. These are the brackets we might need to turn into
+# empty-href citations.
+_BARE_LABEL_RE = re.compile(r"\[([^\]\n]+)\](?![\(\[:])")
+
+
+def normalize_bare_citations(content: str) -> str:
+    """Turn a bare ``[file.ext:line]`` into the empty-href ``[file.ext:line]()``.
+
+    Some models (notably smaller ones) drop the trailing ``()`` the prompt asks
+    for, leaving citations as plain bracketed text. Such text is neither grounded
+    (the verifier only matches ``[x]()``) nor rendered as a clickable source link
+    by the frontend (Markdown.tsx only links empty-href anchors). We add the
+    ``()`` for any bracket whose label parses as a real ``file:line`` citation,
+    leaving every other bracket — prose asides, bare program names, markdown
+    links, reference definitions — untouched. Idempotent: already-parened
+    citations are skipped by the lookahead.
+    """
+    def repl(m: "re.Match") -> str:
+        if parse_citation_label(m.group(1).strip()) is not None:
+            return f"[{m.group(1)}]()"
+        return m.group(0)
+    return _BARE_LABEL_RE.sub(repl, content or "")
+
 
 def resolve_citation(label: str, source_map: Dict[str, FileSource],
                      repo_map: Optional[Dict[str, FileSource]] = None) -> Optional[dict]:

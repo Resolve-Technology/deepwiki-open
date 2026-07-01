@@ -30,6 +30,7 @@ from api.prompt_assembly import (assemble_envelope, fit_envelope_inputs,
                                  format_context_text, number_source_lines,
                                  select_generation_system_prompt)
 from api.citation_grounding import (build_repo_source_map, build_source_map,
+                                    normalize_bare_citations,
                                     verify_page_citations)
 from api.citation_stripping import strip_unverified_claims
 from api.rag import RAG
@@ -98,6 +99,11 @@ async def ground_page_citations(content: str, ctx: "GroundingContext",
     EVERY citation would resolve broken — and we return the page unchanged
     (today's behavior) rather than delete correct content.
     """
+    # Rescue citations from models that dropped the prompt-required `()`: bare
+    # `[file:line]` text is neither grounded nor linked by the frontend. Do this
+    # before verifying (and before the outage-guard early return) so the saved
+    # page carries clickable, verifiable citations on every path.
+    content = normalize_bare_citations(content)
     citations = _verify_citations(content, ctx)
     if not ctx.repo_map:
         return content, citations
@@ -124,7 +130,7 @@ async def ground_page_citations(content: str, ctx: "GroundingContext",
             break
         revised = re.sub(r"^```markdown\s*", "", revised, flags=re.IGNORECASE)
         revised = re.sub(r"```\s*$", "", revised, flags=re.IGNORECASE)
-        revised = revised.strip()
+        revised = normalize_bare_citations(revised.strip())
         if not revised or revised.startswith("Error"):
             break
         content = revised

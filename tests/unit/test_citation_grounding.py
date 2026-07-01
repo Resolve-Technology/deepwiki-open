@@ -2,9 +2,59 @@
 from types import SimpleNamespace
 
 from api.citation_grounding import (FileSource, build_repo_source_map,
-                                    build_source_map, parse_citation_label,
-                                    resolve_citation, verify_page_citations)
+                                    build_source_map, normalize_bare_citations,
+                                    parse_citation_label, resolve_citation,
+                                    verify_page_citations)
 from api.prompt_assembly import number_source_lines
+
+
+def test_normalize_bare_adds_empty_href_to_range():
+    assert normalize_bare_citations("see [prog.cbl:12-34]") == "see [prog.cbl:12-34]()"
+
+
+def test_normalize_bare_adds_empty_href_to_single_line():
+    assert normalize_bare_citations("at [prog.cbl:12].") == "at [prog.cbl:12]()."
+
+
+def test_normalize_bare_adds_empty_href_to_whole_file():
+    assert normalize_bare_citations("see [prog.cbl]") == "see [prog.cbl]()"
+
+
+def test_normalize_leaves_already_parened_alone():
+    # Idempotent: an existing empty-href citation is not double-parened.
+    assert normalize_bare_citations("[prog.cbl:12]()") == "[prog.cbl:12]()"
+
+
+def test_normalize_leaves_real_links_alone():
+    md = "[prog.cbl:12](https://example/blob/x#L12)"
+    assert normalize_bare_citations(md) == md
+
+
+def test_normalize_leaves_non_citation_brackets_alone():
+    # No file extension -> not a citation; bare program names too.
+    assert normalize_bare_citations("[see the docs] and [CAL101]") == "[see the docs] and [CAL101]"
+
+
+def test_normalize_leaves_reference_definitions_alone():
+    # `[1]: url` is a markdown reference def, not a citation.
+    assert normalize_bare_citations("[1]: https://x") == "[1]: https://x"
+
+
+def test_normalize_inside_table_cell():
+    cell = "| BV401 [BV401.txt:2] | done |"
+    assert normalize_bare_citations(cell) == "| BV401 [BV401.txt:2]() | done |"
+
+
+def test_normalize_handles_path_with_spaces():
+    md = "[1.BBC15 - SPLITTER/BBC15.txt:10-20]"
+    assert normalize_bare_citations(md) == "[1.BBC15 - SPLITTER/BBC15.txt:10-20]()"
+
+
+def test_normalize_idempotent_on_mixed_content():
+    md = "ok [a.cbl:1] and [b.cbl:2]() and [text](u) and [note]"
+    once = normalize_bare_citations(md)
+    assert once == "ok [a.cbl:1]() and [b.cbl:2]() and [text](u) and [note]"
+    assert normalize_bare_citations(once) == once
 
 
 def test_parse_citation_label_range():
